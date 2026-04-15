@@ -50,10 +50,48 @@ type SearchOptions struct {
 	Filters map[string]string
 
 	// SortColumn is the column name to sort by.
+	//
+	// Use the special value "_score" to sort by BM25 relevance score
+	// (requires verify_text=ascii|all on the server, MygramDB >= v1.6).
 	SortColumn string
 
 	// SortDesc indicates descending sort order when true.
 	SortDesc bool
+
+	// Fuzzy enables fuzzy (Levenshtein) matching with the given edit
+	// distance. Valid values are 0 (disabled), 1 and 2. Requires
+	// MygramDB >= v1.6.
+	Fuzzy int
+
+	// Highlight, when non-nil, enables the HIGHLIGHT clause so that
+	// matching snippets are returned alongside each primary key.
+	// Requires verify_text=ascii|all on the server and MygramDB >= v1.6.
+	Highlight *HighlightOptions
+}
+
+// HighlightOptions configures the HIGHLIGHT clause introduced in
+// MygramDB v1.6. A zero-value HighlightOptions requests default
+// highlighting ("<em>"/"</em>" tags, 100 code point snippets, up to
+// 3 fragments).
+type HighlightOptions struct {
+	// OpenTag is the tag inserted before each matched term. When empty
+	// the server default ("<em>") is used.
+	OpenTag string
+
+	// CloseTag is the tag inserted after each matched term. When empty
+	// the server default ("</em>") is used.
+	//
+	// OpenTag and CloseTag must be set (or unset) together.
+	CloseTag string
+
+	// SnippetLen is the maximum number of code points per snippet
+	// fragment. Valid range is 1..10000. 0 means "use server default"
+	// (100).
+	SnippetLen int
+
+	// MaxFragments is the maximum number of snippet fragments joined by
+	// ellipsis. Valid range is 1..100. 0 means "use server default" (3).
+	MaxFragments int
 }
 
 // CountOptions holds options for a count request.
@@ -72,6 +110,11 @@ type CountOptions struct {
 type SearchResult struct {
 	// PrimaryKey is the document's primary key.
 	PrimaryKey string
+
+	// Snippet contains the highlighted text fragment for this result,
+	// populated only when SearchOptions.Highlight was set (MygramDB
+	// >= v1.6). Empty otherwise.
+	Snippet string
 }
 
 // SearchResponse represents a search response.
@@ -184,6 +227,44 @@ type CacheStats struct {
 	CurrentEntries int
 	MemoryBytes    int
 	Evictions      int
+}
+
+// FacetOptions holds options for a FACET request. Introduced in
+// MygramDB v1.6.
+type FacetOptions struct {
+	// Query, when non-empty, scopes the facet aggregation to documents
+	// matching the given search text (same semantics as SEARCH).
+	Query string
+
+	// AndTerms is a list of additional keywords combined with AND.
+	AndTerms []string
+
+	// NotTerms is a list of keywords to exclude with NOT.
+	NotTerms []string
+
+	// Filters is a map of column filter conditions (key=value).
+	Filters map[string]string
+
+	// Limit bounds the number of returned (value, count) pairs.
+	// 0 means "no limit".
+	Limit int
+}
+
+// FacetValue is a single aggregated (value, count) pair returned by
+// the FACET command.
+type FacetValue struct {
+	// Value is the facet column's distinct value as a string.
+	Value string
+
+	// Count is the number of documents that have this value.
+	Count int64
+}
+
+// FacetResponse is the response to a FACET command.
+type FacetResponse struct {
+	// Results is the list of (value, count) pairs ordered by count
+	// descending.
+	Results []FacetValue
 }
 
 // SimplifiedExpression represents a simplified search expression.

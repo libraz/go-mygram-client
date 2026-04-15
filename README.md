@@ -10,6 +10,8 @@
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
+Compatible with MygramDB v1.6 (BM25 scoring, HIGHLIGHT, FUZZY, FACET).
+
 ## Overview
 
 MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This client communicates via MygramDB's TCP text protocol (memcached-style) with zero external dependencies.
@@ -101,6 +103,75 @@ resp, err := client.Search("articles", expr.MainTerm, mygram.SearchOptions{
 	SortColumn: "created_at",
 	SortDesc:   true,
 })
+```
+
+## MygramDB v1.6 Features
+
+### BM25 Relevance Scoring
+
+Sort by relevance using the special `_score` sort column (requires
+`verify_text: ascii|all` on the server):
+
+```go
+resp, _ := client.Search("articles", "machine learning", mygram.SearchOptions{
+    SortColumn: "_score",
+    SortDesc:   true,
+    Limit:      10,
+})
+```
+
+### Fuzzy Search (Levenshtein)
+
+```go
+// Match within 1 edit (default) or 2 edits.
+resp, _ := client.Search("articles", "machne", mygram.SearchOptions{
+    Fuzzy: 1,
+    Limit: 10,
+})
+```
+
+### Highlighting
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+    Highlight: &mygram.HighlightOptions{
+        OpenTag:      "<strong>",
+        CloseTag:     "</strong>",
+        SnippetLen:   200,
+        MaxFragments: 3,
+    },
+    SortColumn: "_score",
+    SortDesc:   true,
+    Limit:      10,
+})
+
+for _, r := range resp.Results {
+    fmt.Println(r.PrimaryKey, r.Snippet)
+}
+```
+
+A zero-value `&HighlightOptions{}` enables highlighting with server defaults
+(`<em>`/`</em>`, 100 code points, up to 3 fragments).
+
+### Facets
+
+Aggregate distinct filter column values with document counts. Optionally scope
+the aggregation to a search result set:
+
+```go
+// All distinct statuses:
+resp, _ := client.Facet("articles", "status", mygram.FacetOptions{})
+
+// Top categories among documents matching "machine learning":
+resp, _ := client.Facet("articles", "category", mygram.FacetOptions{
+    Query:   "machine learning",
+    Filters: map[string]string{"status": "1"},
+    Limit:   10,
+})
+
+for _, v := range resp.Results {
+    fmt.Printf("%s: %d\n", v.Value, v.Count)
+}
 ```
 
 ## Development

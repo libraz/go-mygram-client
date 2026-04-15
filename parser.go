@@ -6,9 +6,24 @@ import (
 )
 
 // parseSearchResponse parses a SEARCH response.
-// Format: OK RESULTS <total_count> <id1> <id2> ...
+//
+// Two formats are supported:
+//
+//  1. Standard (single-line results):
+//     OK RESULTS <total_count> <id1> <id2> ...
+//
+//  2. HIGHLIGHT (multi-line results, introduced in MygramDB v1.6):
+//     OK RESULTS <total_count>
+//     <id1>\t<snippet1>
+//     <id2>\t<snippet2>
+//     ...
+//
+// Both formats optionally append a `# DEBUG` block terminated by \r\n\r\n.
 func parseSearchResponse(response string) (*SearchResponse, error) {
-	lines := strings.Split(response, "\n")
+	// Normalize on \n for easier line handling; callers have already
+	// collapsed \r\n -> \n, but we guard here for completeness.
+	normalized := strings.ReplaceAll(response, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
 	firstLine := lines[0]
 
 	if !strings.HasPrefix(firstLine, "OK RESULTS ") {
@@ -25,17 +40,47 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 		return nil, &ProtocolError{Message: "invalid total count: " + parts[2]}
 	}
 
-	results := make([]SearchResult, 0, len(parts)-3)
-	for _, id := range parts[3:] {
-		results = append(results, SearchResult{PrimaryKey: id})
+	// Collect any subsequent lines that precede the debug block. If any
+	// such line contains a tab, it is a HIGHLIGHT result row. Otherwise
+	// the response is the classic single-line format.
+	var highlightLines []string
+	debugStart := -1
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if line == "# DEBUG" {
+			debugStart = i + 1
+			break
+		}
+		if line == "" {
+			continue
+		}
+		highlightLines = append(highlightLines, line)
+	}
+
+	var results []SearchResult
+	if len(highlightLines) > 0 {
+		// HIGHLIGHT mode: first line contains only the count.
+		results = make([]SearchResult, 0, len(highlightLines))
+		for _, line := range highlightLines {
+			pk := line
+			snippet := ""
+			if tab := strings.IndexByte(line, '\t'); tab >= 0 {
+				pk = line[:tab]
+				snippet = line[tab+1:]
+			}
+			results = append(results, SearchResult{PrimaryKey: pk, Snippet: snippet})
+		}
+	} else {
+		// Classic mode: PKs follow the count on the first line.
+		results = make([]SearchResult, 0, len(parts)-3)
+		for _, id := range parts[3:] {
+			results = append(results, SearchResult{PrimaryKey: id})
+		}
 	}
 
 	var debug *DebugInfo
-	for i, line := range lines {
-		if line == "# DEBUG" && i+1 < len(lines) {
-			debug = parseDebugInfo(lines[i+1:])
-			break
-		}
+	if debugStart >= 0 && debugStart < len(lines) {
+		debug = parseDebugInfo(lines[debugStart:])
 	}
 
 	return &SearchResponse{
@@ -43,6 +88,56 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 		TotalCount: totalCount,
 		Debug:      debug,
 	}, nil
+}
+
+// parseFacetResponse parses a FACET response.
+//
+// Format (MygramDB >= v1.6):
+//
+//	OK FACET <num_values>
+//	<value1>\t<count1>
+//	<value2>\t<count2>
+//	...
+//	[# query_time_ms: <n>]
+//	[# total_docs_searched: <n>]
+func parseFacetResponse(response string) (*FacetResponse, error) {
+	normalized := strings.ReplaceAll(response, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	firstLine := lines[0]
+
+	if !strings.HasPrefix(firstLine, "OK FACET") {
+		return nil, &ProtocolError{Message: "invalid FACET response: " + firstLine}
+	}
+
+	// First line is "OK FACET <num_values>"; count is the third token.
+	parts := strings.Fields(firstLine)
+	if len(parts) < 3 {
+		return nil, &ProtocolError{Message: "invalid FACET response: missing count"}
+	}
+	expected, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return nil, &ProtocolError{Message: "invalid FACET count: " + parts[2]}
+	}
+
+	results := make([]FacetValue, 0, expected)
+	for _, line := range lines[1:] {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		tab := strings.IndexByte(line, '\t')
+		if tab < 0 {
+			return nil, &ProtocolError{Message: "invalid FACET row: " + line}
+		}
+		value := line[:tab]
+		countStr := strings.TrimSpace(line[tab+1:])
+		count, err := strconv.ParseInt(countStr, 10, 64)
+		if err != nil {
+			return nil, &ProtocolError{Message: "invalid FACET count for " + value + ": " + countStr}
+		}
+		results = append(results, FacetValue{Value: value, Count: count})
+	}
+
+	return &FacetResponse{Results: results}, nil
 }
 
 // parseCountResponse parses a COUNT response.

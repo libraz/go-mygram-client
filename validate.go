@@ -138,3 +138,72 @@ func validatePrimaryKey(pk string) error {
 	}
 	return ensureSafeValue(pk, "primary_key")
 }
+
+// validateFuzzy validates a fuzzy edit distance. The server accepts 1 or 2;
+// 0 means the clause is disabled.
+func validateFuzzy(distance int) error {
+	if distance == 0 || distance == 1 || distance == 2 {
+		return nil
+	}
+	return &ValidationError{
+		Message: fmt.Sprintf("invalid fuzzy distance %d: must be 0, 1, or 2", distance),
+	}
+}
+
+// validateHighlight validates HIGHLIGHT clause options. OpenTag and CloseTag
+// must both be empty or both set; SnippetLen must be within 1..10000 when set;
+// MaxFragments must be within 1..100 when set. Tags must not contain control
+// characters or spaces (the protocol is whitespace-delimited).
+func validateHighlight(h *HighlightOptions) error {
+	if h == nil {
+		return nil
+	}
+	if (h.OpenTag == "") != (h.CloseTag == "") {
+		return &ValidationError{Message: "highlight open_tag and close_tag must be set together"}
+	}
+	for _, tag := range []struct {
+		name, value string
+	}{
+		{"highlight.open_tag", h.OpenTag},
+		{"highlight.close_tag", h.CloseTag},
+	} {
+		if tag.value == "" {
+			continue
+		}
+		if err := ensureSafeValue(tag.value, tag.name); err != nil {
+			return err
+		}
+		for _, r := range tag.value {
+			if unicode.IsSpace(r) {
+				return &ValidationError{
+					Message: fmt.Sprintf("%s must not contain whitespace: %q", tag.name, tag.value),
+				}
+			}
+		}
+	}
+	if h.SnippetLen < 0 || h.SnippetLen > 10000 {
+		return &ValidationError{
+			Message: fmt.Sprintf("highlight.snippet_len out of range (0..10000): %d", h.SnippetLen),
+		}
+	}
+	if h.MaxFragments < 0 || h.MaxFragments > 100 {
+		return &ValidationError{
+			Message: fmt.Sprintf("highlight.max_fragments out of range (0..100): %d", h.MaxFragments),
+		}
+	}
+	return nil
+}
+
+// validateFacetColumn validates a FACET column name. Same rules as table names:
+// must be non-empty and contain no control or whitespace characters.
+func validateFacetColumn(column string) error {
+	if column == "" {
+		return &ValidationError{Message: "facet column must not be empty"}
+	}
+	for _, r := range column {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return &ValidationError{Message: fmt.Sprintf("facet column contains invalid character: %q", r)}
+		}
+	}
+	return nil
+}

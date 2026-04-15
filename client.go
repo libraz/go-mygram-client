@@ -232,6 +232,13 @@ func isResponseComplete(data string) bool {
 		return strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n")
 	}
 
+	// FACET response: first line starts with "OK FACET <n>", followed by
+	// <value>\t<count> lines and optional debug comments. Terminated by the
+	// server-appended trailing \r\n (i.e. ends with \r\n\r\n).
+	if strings.HasPrefix(data, "OK FACET") {
+		return strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n")
+	}
+
 	// REPLICATION response (END marker)
 	normalized := strings.ReplaceAll(data, "\r\n", "\n")
 	if strings.HasPrefix(normalized, "OK REPLICATION\n") {
@@ -289,6 +296,12 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 	if err := ensureQueryLengthWithinLimit(query, opts.AndTerms, opts.NotTerms, opts.Filters, opts.SortColumn, c.config.MaxQueryLength); err != nil {
 		return nil, err
 	}
+	if err := validateFuzzy(opts.Fuzzy); err != nil {
+		return nil, err
+	}
+	if err := validateHighlight(opts.Highlight); err != nil {
+		return nil, err
+	}
 
 	limit := opts.Limit
 	if limit <= 0 {
@@ -314,6 +327,24 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		parts = append(parts, "SORT", opts.SortColumn, dir)
 	}
 
+	if opts.Fuzzy > 0 {
+		parts = append(parts, "FUZZY", strconv.Itoa(opts.Fuzzy))
+	}
+
+	if opts.Highlight != nil {
+		parts = append(parts, "HIGHLIGHT")
+		h := opts.Highlight
+		if h.OpenTag != "" || h.CloseTag != "" {
+			parts = append(parts, "TAG", h.OpenTag, h.CloseTag)
+		}
+		if h.SnippetLen > 0 {
+			parts = append(parts, "SNIPPET_LEN", strconv.Itoa(h.SnippetLen))
+		}
+		if h.MaxFragments > 0 {
+			parts = append(parts, "MAX_FRAGMENTS", strconv.Itoa(h.MaxFragments))
+		}
+	}
+
 	if opts.Offset > 0 {
 		parts = append(parts, "LIMIT", fmt.Sprintf("%d,%d", opts.Offset, limit))
 	} else {
@@ -325,6 +356,61 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		return nil, err
 	}
 	return parseSearchResponse(response)
+}
+
+// Facet aggregates distinct values of a filter column with their document
+// counts. Optionally scoped to a search result set via opts.Query and
+// related options. Available on MygramDB >= v1.6.
+func (c *Client) Facet(table, column string, opts FacetOptions) (*FacetResponse, error) {
+	return c.FacetContext(context.Background(), table, column, opts)
+}
+
+// FacetContext is the context-aware variant of Facet.
+func (c *Client) FacetContext(ctx context.Context, table, column string, opts FacetOptions) (*FacetResponse, error) {
+	if err := validateTableName(table); err != nil {
+		return nil, err
+	}
+	if err := validateFacetColumn(column); err != nil {
+		return nil, err
+	}
+	if err := ensureSafeValue(opts.Query, "query"); err != nil {
+		return nil, err
+	}
+	if err := ensureSafeValues(opts.AndTerms, "andTerms"); err != nil {
+		return nil, err
+	}
+	if err := ensureSafeValues(opts.NotTerms, "notTerms"); err != nil {
+		return nil, err
+	}
+	if err := ensureSafeFilters(opts.Filters); err != nil {
+		return nil, err
+	}
+	if err := ensureQueryLengthWithinLimit(opts.Query, opts.AndTerms, opts.NotTerms, opts.Filters, "", c.config.MaxQueryLength); err != nil {
+		return nil, err
+	}
+
+	parts := []string{"FACET", table, column}
+	if opts.Query != "" {
+		parts = append(parts, opts.Query)
+	}
+	for _, term := range opts.AndTerms {
+		parts = append(parts, "AND", term)
+	}
+	for _, term := range opts.NotTerms {
+		parts = append(parts, "NOT", term)
+	}
+	for k, v := range opts.Filters {
+		parts = append(parts, "FILTER", k, "=", v)
+	}
+	if opts.Limit > 0 {
+		parts = append(parts, "LIMIT", strconv.Itoa(opts.Limit))
+	}
+
+	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))
+	if err != nil {
+		return nil, err
+	}
+	return parseFacetResponse(response)
 }
 
 // Count returns the number of matching documents.
