@@ -228,13 +228,48 @@ func ConvertSearchExpression(expression string) (string, error) {
 
 // SimplifySearchExpression decomposes a search expression into MainTerm/AndTerms/NotTerms.
 // The result maps directly to the MygramDB SEARCH command format.
+//
+// OR-only or parenthesized sub-expressions (e.g. "python OR ruby" or
+// "(a OR b)") are surfaced as a single parenthesized MainTerm so the OR
+// semantics survive when the caller AND-composes the result. Mixed
+// expressions that combine required terms with an OR sub-expression keep
+// the required terms; the OR sub-expression is currently not surfaced.
 func SimplifySearchExpression(expression string) (*SimplifiedExpression, error) {
 	expr, err := ParseSearchExpression(expression)
 	if err != nil {
 		return nil, err
 	}
 
-	// Collect positive terms (required + optional)
+	// Complex expression (OR / parenthesized): the OptionalTerms list
+	// contains the inside of OR sub-expressions, which would lose meaning
+	// if flattened into AND. Use the raw expression as MainTerm.
+	if HasComplexExpression(expr) {
+		if len(expr.RequiredTerms) > 0 {
+			result := &SimplifiedExpression{MainTerm: expr.RequiredTerms[0]}
+			if len(expr.RequiredTerms) > 1 {
+				result.AndTerms = append([]string(nil), expr.RequiredTerms[1:]...)
+			}
+			if len(expr.ExcludedTerms) > 0 {
+				result.NotTerms = append([]string(nil), expr.ExcludedTerms...)
+			}
+			return result, nil
+		}
+
+		raw := strings.TrimSpace(expr.RawExpression)
+		var mainTerm string
+		if strings.HasPrefix(raw, "(") && strings.HasSuffix(raw, ")") {
+			mainTerm = raw
+		} else {
+			mainTerm = "(" + raw + ")"
+		}
+		result := &SimplifiedExpression{MainTerm: mainTerm}
+		if len(expr.ExcludedTerms) > 0 {
+			result.NotTerms = append([]string(nil), expr.ExcludedTerms...)
+		}
+		return result, nil
+	}
+
+	// Simple expression: combine required + optional (the implicit AND case).
 	var positiveTerms []string
 	positiveTerms = append(positiveTerms, expr.RequiredTerms...)
 	positiveTerms = append(positiveTerms, expr.OptionalTerms...)

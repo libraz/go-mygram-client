@@ -181,6 +181,14 @@ type ReplicationStatus struct {
 
 	// StatusStr is the raw response string.
 	StatusStr string
+
+	// ProcessedEvents is the total number of binlog events processed since
+	// startup. Populated only by the multi-line REPLICATION STATUS response.
+	ProcessedEvents int
+
+	// QueueSize is the number of events currently pending in the
+	// replication apply queue. Populated only by the multi-line response.
+	QueueSize int
 }
 
 // DebugInfo holds query metrics from debug mode.

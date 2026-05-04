@@ -212,6 +212,49 @@ func TestParseReplicationStatusResponse(t *testing.T) {
 			t.Errorf("GTID = %q, want %q", status.GTID, "xyz-789")
 		}
 	})
+
+	t.Run("multi-line with processed_events and queue_size", func(t *testing.T) {
+		response := "OK REPLICATION\nstatus: running\ncurrent_gtid: abc-123\nprocessed_events: 1234\nqueue_size: 5\nEND"
+		status, err := parseReplicationStatusResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.ProcessedEvents != 1234 {
+			t.Errorf("ProcessedEvents = %d, want 1234", status.ProcessedEvents)
+		}
+		if status.QueueSize != 5 {
+			t.Errorf("QueueSize = %d, want 5", status.QueueSize)
+		}
+	})
+
+	t.Run("processed_events defaults to zero", func(t *testing.T) {
+		response := "OK REPLICATION\nstatus: running\ncurrent_gtid: abc\nEND"
+		status, err := parseReplicationStatusResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.ProcessedEvents != 0 {
+			t.Errorf("ProcessedEvents = %d, want 0", status.ProcessedEvents)
+		}
+		if status.QueueSize != 0 {
+			t.Errorf("QueueSize = %d, want 0", status.QueueSize)
+		}
+	})
+
+	t.Run("gtid key alias accepted", func(t *testing.T) {
+		// Some server builds emit `gtid:` instead of `current_gtid:`.
+		response := "OK REPLICATION\nstatus: stopped\ngtid: aaa-bbb\nEND"
+		status, err := parseReplicationStatusResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.GTID != "aaa-bbb" {
+			t.Errorf("GTID = %q, want %q", status.GTID, "aaa-bbb")
+		}
+		if status.Running {
+			t.Error("Running should be false")
+		}
+	})
 }
 
 func TestParseDumpStatusResponse(t *testing.T) {

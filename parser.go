@@ -276,8 +276,12 @@ func parseReplicationStatusResponse(response string) (*ReplicationStatus, error)
 			switch key {
 			case "status":
 				status.Running = value == "running"
-			case "current_gtid":
+			case "current_gtid", "gtid":
 				status.GTID = value
+			case "processed_events":
+				status.ProcessedEvents, _ = strconv.Atoi(value)
+			case "queue_size":
+				status.QueueSize, _ = strconv.Atoi(value)
 			}
 		}
 		return status, nil

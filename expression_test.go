@@ -144,6 +144,47 @@ func TestSimplifySearchExpression(t *testing.T) {
 			t.Error("expected error")
 		}
 	})
+
+	t.Run("OR-only expression preserved as parenthesized main term", func(t *testing.T) {
+		result, err := SimplifySearchExpression("python OR ruby")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MainTerm != "(python OR ruby)" {
+			t.Errorf("MainTerm = %q, want %q", result.MainTerm, "(python OR ruby)")
+		}
+		if len(result.AndTerms) != 0 {
+			t.Errorf("AndTerms = %v, want empty", result.AndTerms)
+		}
+		if len(result.NotTerms) != 0 {
+			t.Errorf("NotTerms = %v, want empty", result.NotTerms)
+		}
+	})
+
+	t.Run("already parenthesized OR not double-wrapped", func(t *testing.T) {
+		result, err := SimplifySearchExpression("(python OR ruby)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MainTerm != "(python OR ruby)" {
+			t.Errorf("MainTerm = %q, want %q", result.MainTerm, "(python OR ruby)")
+		}
+	})
+
+	t.Run("required with OR sub-expression keeps required terms", func(t *testing.T) {
+		// Mixed: +required and OR sub-expression. Per the C++ client behavior,
+		// the OR sub-expression is currently not surfaced through Simplify.
+		result, err := SimplifySearchExpression("+golang (tutorial OR guide)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.MainTerm != "golang" {
+			t.Errorf("MainTerm = %q, want %q", result.MainTerm, "golang")
+		}
+		if len(result.AndTerms) != 0 {
+			t.Errorf("AndTerms = %v, want empty", result.AndTerms)
+		}
+	})
 }
 
 func TestConvertSearchExpression(t *testing.T) {

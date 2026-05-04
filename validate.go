@@ -2,6 +2,7 @@ package mygram
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 )
 
@@ -118,6 +119,33 @@ func ensureQueryLengthWithinLimit(query string, andTerms, notTerms []string, fil
 	return nil
 }
 
+// validateIdentifier validates an unquoted identifier such as a table name,
+// primary key, sort column or filter key. Identifiers are sent on the wire
+// without quoting; embedded whitespace would split the value into multiple
+// tokens and corrupt the protocol stream.
+func validateIdentifier(value, fieldName string) error {
+	if value == "" {
+		return &ValidationError{Message: fmt.Sprintf("input for %s is empty", fieldName)}
+	}
+	for _, r := range value {
+		if isControlChar(r) {
+			name, ok := controlCharNames[r]
+			if !ok {
+				name = fmt.Sprintf("U+%04X", r)
+			}
+			return &ValidationError{
+				Message: fmt.Sprintf("input for %s contains %s, which is not allowed", fieldName, name),
+			}
+		}
+		if unicode.IsSpace(r) {
+			return &ValidationError{
+				Message: fmt.Sprintf("input for %s contains whitespace, which is not allowed in identifiers", fieldName),
+			}
+		}
+	}
+	return nil
+}
+
 // validateTableName validates a table name.
 func validateTableName(table string) error {
 	if table == "" {
@@ -131,12 +159,68 @@ func validateTableName(table string) error {
 	return nil
 }
 
-// validatePrimaryKey validates a primary key.
+// validatePrimaryKey validates a primary key. Primary keys are sent unquoted
+// on the wire and therefore must not contain whitespace either.
 func validatePrimaryKey(pk string) error {
 	if pk == "" {
 		return &ValidationError{Message: "primary key must not be empty"}
 	}
-	return ensureSafeValue(pk, "primary_key")
+	if err := ensureSafeValue(pk, "primary_key"); err != nil {
+		return err
+	}
+	for _, r := range pk {
+		if unicode.IsSpace(r) {
+			return &ValidationError{
+				Message: fmt.Sprintf("primary key contains whitespace, which is not allowed: %q", r),
+			}
+		}
+	}
+	return nil
+}
+
+// escapeQueryString quotes and escapes a free-form value for use as a wire
+// token.
+//
+// Empty strings are emitted as the explicit "" token to keep the wire form
+// unambiguous: an unquoted empty arg would collapse into surrounding
+// whitespace and produce a malformed command (e.g. "SEARCH table  AND foo").
+//
+// Values containing whitespace, double quotes or single quotes are wrapped
+// in double quotes with internal quotes/backslashes escaped. Control
+// characters are stripped to prevent command injection.
+func escapeQueryString(value string) string {
+	if value == "" {
+		return `""`
+	}
+
+	needsQuotes := false
+	for _, r := range value {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' {
+			needsQuotes = true
+			break
+		}
+	}
+	if !needsQuotes {
+		return value
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(value) + 2)
+	sb.WriteByte('"')
+	for _, r := range value {
+		switch {
+		case r == '"' || r == '\\':
+			sb.WriteByte('\\')
+			sb.WriteRune(r)
+		case r < 0x20:
+			// Drop control characters.
+			continue
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	sb.WriteByte('"')
+	return sb.String()
 }
 
 // validateFuzzy validates a fuzzy edit distance. The server accepts 1 or 2;

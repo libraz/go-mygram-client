@@ -216,41 +216,84 @@ func (c *Client) readResponse(timeout time.Duration) (string, error) {
 	}
 }
 
+// endTerminatedPrefix describes a multi-line response prefix that is
+// terminated by "END\r\n" (or "END\n"). When exactMatch is true the first
+// line must equal the prefix exactly; otherwise the prefix may be followed
+// by " <payload>" on the same line (e.g. "OK DUMP_INFO /path/to/file").
+type endTerminatedPrefix struct {
+	prefix     string
+	exactMatch bool
+}
+
+// endTerminatedPrefixes lists every multi-line response prefix that the
+// server terminates with an explicit "END" marker. Matched against the
+// first line of the buffer only, to avoid false positives when the prefix
+// appears later as payload (e.g. as a primary key).
+var endTerminatedPrefixes = []endTerminatedPrefix{
+	{"OK INFO", true},
+	{"OK REPLICATION", true},
+	{"OK CACHE_STATS", true},
+	{"OK DUMP_STATUS", true},
+	{"OK DUMP_INFO", false},
+}
+
 // isResponseComplete determines whether the response has been fully received.
 func isResponseComplete(data string) bool {
-	// Multi-line response (terminated by empty line)
-	if strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n") {
-		return true
+	endsWithBlank := strings.HasSuffix(data, "\n\n") ||
+		strings.HasSuffix(data, "\r\n\r\n") ||
+		strings.HasSuffix(data, "\n\r\n")
+
+	endsWithEndMarker := strings.HasSuffix(data, "\nEND\n") ||
+		strings.HasSuffix(data, "\nEND\r\n") ||
+		strings.HasSuffix(data, "\nEND") ||
+		strings.HasSuffix(data, "\r\nEND")
+
+	// First-line prefix detection for END-terminated multi-line responses.
+	// Accept either an explicit END marker (the canonical termination per the
+	// MygramDB v1.6 protocol) or a trailing blank line, since the Go test
+	// fixtures and earlier server builds use blank-line termination.
+	if firstLine, ok := extractFirstLine(data); ok {
+		for _, p := range endTerminatedPrefixes {
+			matched := false
+			if p.exactMatch {
+				matched = firstLine == p.prefix
+			} else {
+				matched = firstLine == p.prefix || strings.HasPrefix(firstLine, p.prefix+" ")
+			}
+			if matched {
+				return endsWithEndMarker || endsWithBlank
+			}
+		}
 	}
 
-	// Multi-line INFO/CONFIG response
-	if strings.Contains(data, "OK INFO\n") || strings.Contains(data, "OK INFO\r\n") ||
-		strings.Contains(data, "OK CONFIG\n") || strings.Contains(data, "OK CONFIG\r\n") ||
-		strings.HasPrefix(data, "+OK\n") || strings.HasPrefix(data, "+OK\r\n") ||
-		strings.Contains(data, "OK DUMP_STATUS\n") || strings.Contains(data, "OK DUMP_STATUS\r\n") ||
-		strings.Contains(data, "OK CACHE_STATS\n") || strings.Contains(data, "OK CACHE_STATS\r\n") {
-		return strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n")
+	// CONFIG: "+OK\n..." terminated by blank line.
+	if strings.HasPrefix(data, "+OK\n") || strings.HasPrefix(data, "+OK\r\n") || data == "+OK" {
+		return endsWithBlank
+	}
+
+	// Multi-line OK CONFIG.
+	if strings.HasPrefix(data, "OK CONFIG\n") || strings.HasPrefix(data, "OK CONFIG\r\n") {
+		return endsWithBlank
 	}
 
 	// FACET response: first line starts with "OK FACET <n>", followed by
 	// <value>\t<count> lines and optional debug comments. Terminated by the
 	// server-appended trailing \r\n (i.e. ends with \r\n\r\n).
 	if strings.HasPrefix(data, "OK FACET") {
-		return strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n")
+		return endsWithBlank
 	}
 
-	// REPLICATION response (END marker)
-	normalized := strings.ReplaceAll(data, "\r\n", "\n")
-	if strings.HasPrefix(normalized, "OK REPLICATION\n") {
-		return strings.Contains(normalized, "\nEND\n") || strings.HasSuffix(normalized, "\nEND")
+	// Generic multi-line terminator (e.g. SEARCH HIGHLIGHT).
+	if endsWithBlank {
+		return true
 	}
 
-	// DEBUG response
+	// DEBUG response.
 	if strings.Contains(data, "# DEBUG") {
-		return strings.HasSuffix(data, "\n\n") || strings.HasSuffix(data, "\r\n\r\n") || strings.HasSuffix(data, "\n\r\n")
+		return endsWithBlank
 	}
 
-	// Single-line response
+	// Single-line response with trailing newline.
 	lines := strings.Split(data, "\n")
 	if len(lines) >= 2 && lines[len(lines)-1] == "" {
 		return true
@@ -264,6 +307,21 @@ func isResponseComplete(data string) bool {
 	}
 
 	return false
+}
+
+// extractFirstLine returns the first line of the buffer (stripped of CR/LF)
+// and whether a complete first line was found.
+func extractFirstLine(data string) (string, bool) {
+	idxCRLF := strings.Index(data, "\r\n")
+	idxLF := strings.Index(data, "\n")
+	switch {
+	case idxCRLF == -1 && idxLF == -1:
+		return "", false
+	case idxCRLF != -1 && (idxLF == -1 || idxCRLF <= idxLF):
+		return data[:idxCRLF], true
+	default:
+		return data[:idxLF], true
+	}
 }
 
 // Search performs a full-text search.
@@ -288,8 +346,13 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 	if err := ensureSafeFilters(opts.Filters); err != nil {
 		return nil, err
 	}
+	for k := range opts.Filters {
+		if err := validateIdentifier(k, "filter key"); err != nil {
+			return nil, err
+		}
+	}
 	if opts.SortColumn != "" {
-		if err := ensureSafeValue(opts.SortColumn, "sortColumn"); err != nil {
+		if err := validateIdentifier(opts.SortColumn, "sort column"); err != nil {
 			return nil, err
 		}
 	}
@@ -303,21 +366,16 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		return nil, err
 	}
 
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 1000
-	}
-
-	parts := []string{"SEARCH", table, query}
+	parts := []string{"SEARCH", table, escapeQueryString(query)}
 
 	for _, term := range opts.AndTerms {
-		parts = append(parts, "AND", term)
+		parts = append(parts, "AND", escapeQueryString(term))
 	}
 	for _, term := range opts.NotTerms {
-		parts = append(parts, "NOT", term)
+		parts = append(parts, "NOT", escapeQueryString(term))
 	}
 	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", v)
+		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
 	}
 	if opts.SortColumn != "" {
 		dir := "ASC"
@@ -345,10 +403,18 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		}
 	}
 
-	if opts.Offset > 0 {
-		parts = append(parts, "LIMIT", fmt.Sprintf("%d,%d", opts.Offset, limit))
-	} else {
-		parts = append(parts, "LIMIT", strconv.Itoa(limit))
+	switch {
+	case opts.Offset > 0 && opts.Limit > 0:
+		parts = append(parts, "LIMIT", fmt.Sprintf("%d,%d", opts.Offset, opts.Limit))
+	case opts.Offset > 0:
+		// offset > 0 with limit == 0: emit a bare OFFSET clause so the server
+		// actually skips records instead of returning the first page.
+		parts = append(parts, "OFFSET", strconv.Itoa(opts.Offset))
+	case opts.Limit > 0:
+		parts = append(parts, "LIMIT", strconv.Itoa(opts.Limit))
+	default:
+		// Both zero: preserve historical default of LIMIT 1000.
+		parts = append(parts, "LIMIT", "1000")
 	}
 
 	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))
@@ -385,22 +451,27 @@ func (c *Client) FacetContext(ctx context.Context, table, column string, opts Fa
 	if err := ensureSafeFilters(opts.Filters); err != nil {
 		return nil, err
 	}
+	for k := range opts.Filters {
+		if err := validateIdentifier(k, "filter key"); err != nil {
+			return nil, err
+		}
+	}
 	if err := ensureQueryLengthWithinLimit(opts.Query, opts.AndTerms, opts.NotTerms, opts.Filters, "", c.config.MaxQueryLength); err != nil {
 		return nil, err
 	}
 
 	parts := []string{"FACET", table, column}
 	if opts.Query != "" {
-		parts = append(parts, opts.Query)
+		parts = append(parts, escapeQueryString(opts.Query))
 	}
 	for _, term := range opts.AndTerms {
-		parts = append(parts, "AND", term)
+		parts = append(parts, "AND", escapeQueryString(term))
 	}
 	for _, term := range opts.NotTerms {
-		parts = append(parts, "NOT", term)
+		parts = append(parts, "NOT", escapeQueryString(term))
 	}
 	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", v)
+		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
 	}
 	if opts.Limit > 0 {
 		parts = append(parts, "LIMIT", strconv.Itoa(opts.Limit))
@@ -435,16 +506,21 @@ func (c *Client) CountContext(ctx context.Context, table, query string, opts Cou
 	if err := ensureSafeFilters(opts.Filters); err != nil {
 		return nil, err
 	}
+	for k := range opts.Filters {
+		if err := validateIdentifier(k, "filter key"); err != nil {
+			return nil, err
+		}
+	}
 
-	parts := []string{"COUNT", table, query}
+	parts := []string{"COUNT", table, escapeQueryString(query)}
 	for _, term := range opts.AndTerms {
-		parts = append(parts, "AND", term)
+		parts = append(parts, "AND", escapeQueryString(term))
 	}
 	for _, term := range opts.NotTerms {
-		parts = append(parts, "NOT", term)
+		parts = append(parts, "NOT", escapeQueryString(term))
 	}
 	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", v)
+		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
 	}
 
 	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))

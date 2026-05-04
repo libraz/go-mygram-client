@@ -353,6 +353,173 @@ func TestIsResponseComplete(t *testing.T) {
 	}
 }
 
+// captureSearchCommand connects to a mock server, runs Search with the given
+// query+opts, and returns the wire-form command the server received.
+func captureSearchCommand(t *testing.T, query string, opts SearchOptions) string {
+	t.Helper()
+	var receivedCmd string
+	addr, cleanup := mockServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+		n, _ := conn.Read(buf)
+		receivedCmd = string(buf[:n])
+		_, _ = conn.Write([]byte("OK RESULTS 0\r\n"))
+	})
+	defer cleanup()
+
+	c := NewClient(addr)
+	c.config.MaxQueryLength = 0
+	defer func() { _ = c.Close() }()
+
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Search("threads", query, opts); err != nil {
+		t.Fatal(err)
+	}
+	return receivedCmd
+}
+
+func TestSearchOffsetOnlyEmitsBareOffset(t *testing.T) {
+	cmd := captureSearchCommand(t, "hello", SearchOptions{Offset: 42})
+	if !strings.Contains(cmd, "OFFSET 42") {
+		t.Errorf("expected bare OFFSET 42 in command, got %q", cmd)
+	}
+	if strings.Contains(cmd, "LIMIT") {
+		t.Errorf("expected no LIMIT clause, got %q", cmd)
+	}
+}
+
+func TestSearchOffsetAndLimitEmitsCombinedForm(t *testing.T) {
+	cmd := captureSearchCommand(t, "hello", SearchOptions{Limit: 10, Offset: 20})
+	if !strings.Contains(cmd, "LIMIT 20,10") {
+		t.Errorf("expected LIMIT 20,10 in command, got %q", cmd)
+	}
+}
+
+func TestSearchBothZeroEmitsDefaultLimit(t *testing.T) {
+	cmd := captureSearchCommand(t, "hello", SearchOptions{})
+	if !strings.Contains(cmd, "LIMIT 1000") {
+		t.Errorf("expected default LIMIT 1000, got %q", cmd)
+	}
+	if strings.Contains(cmd, "OFFSET") {
+		t.Errorf("expected no OFFSET, got %q", cmd)
+	}
+}
+
+func TestSearchEmptyQueryQuotedOnWire(t *testing.T) {
+	cmd := captureSearchCommand(t, "", SearchOptions{Limit: 10})
+	// The query token between table and the next clause must be the explicit ""
+	if !strings.Contains(cmd, `SEARCH threads ""`) {
+		t.Errorf("expected SEARCH threads \"\" in command, got %q", cmd)
+	}
+}
+
+func TestSearchQueryWithSpaceQuoted(t *testing.T) {
+	cmd := captureSearchCommand(t, "hello world", SearchOptions{Limit: 10})
+	if !strings.Contains(cmd, `SEARCH threads "hello world"`) {
+		t.Errorf("expected quoted multi-word query, got %q", cmd)
+	}
+}
+
+func TestSearchFilterValueWithSpaceQuoted(t *testing.T) {
+	cmd := captureSearchCommand(t, "hi", SearchOptions{
+		Limit:   10,
+		Filters: map[string]string{"title": "hello world"},
+	})
+	if !strings.Contains(cmd, `FILTER title = "hello world"`) {
+		t.Errorf("expected quoted filter value, got %q", cmd)
+	}
+}
+
+func TestSearchAndTermWithSpaceQuoted(t *testing.T) {
+	cmd := captureSearchCommand(t, "hi", SearchOptions{
+		Limit:    10,
+		AndTerms: []string{"machine learning"},
+	})
+	if !strings.Contains(cmd, `AND "machine learning"`) {
+		t.Errorf("expected quoted AND term, got %q", cmd)
+	}
+}
+
+func TestSearchRejectsFilterKeyWithWhitespace(t *testing.T) {
+	c := NewClient("127.0.0.1:1") // unused; validation runs before connect
+	_, err := c.Search("threads", "hi", SearchOptions{
+		Limit:   10,
+		Filters: map[string]string{"bad key": "v"},
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if _, ok := err.(*ValidationError); !ok {
+		t.Errorf("expected *ValidationError, got %T", err)
+	}
+}
+
+func TestSearchRejectsSortColumnWithWhitespace(t *testing.T) {
+	c := NewClient("127.0.0.1:1")
+	_, err := c.Search("threads", "hi", SearchOptions{
+		Limit:      10,
+		SortColumn: "bad column",
+	})
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if _, ok := err.(*ValidationError); !ok {
+		t.Errorf("expected *ValidationError, got %T", err)
+	}
+}
+
+func TestIsResponseCompleteFirstLinePrefixOnly(t *testing.T) {
+	// First-line prefix matching: a response whose first line is OK RESULTS
+	// must not be treated as DUMP_STATUS just because the substring appears
+	// later in the payload.
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			"DUMP_INFO with filepath END-terminated complete",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\nEND\r\n",
+			true,
+		},
+		{
+			"DUMP_INFO incomplete without END or blank line",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\n",
+			false,
+		},
+		{
+			"DUMP_INFO with blank-line termination",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\n\r\n",
+			true,
+		},
+		{
+			"OK RESULTS with DUMP_STATUS-looking PK is single-line complete",
+			"OK RESULTS 1 OK_DUMP_STATUS_pk\r\n",
+			true,
+		},
+		{
+			"OK CACHE_STATS with END",
+			"OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n",
+			true,
+		},
+		{
+			"OK CACHE_STATS incomplete",
+			"OK CACHE_STATS\r\nenabled: true",
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isResponseComplete(tt.data); got != tt.want {
+				t.Errorf("isResponseComplete(%q) = %v, want %v", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConnectToNonexistentServer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -1,6 +1,7 @@
 package mygram
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -124,5 +125,82 @@ func TestValidatePrimaryKey(t *testing.T) {
 	}
 	if err := validatePrimaryKey("bad\x00key"); err == nil {
 		t.Error("expected error for key with null")
+	}
+	if err := validatePrimaryKey("bad key"); err == nil {
+		t.Error("expected error for primary key with whitespace")
+	}
+}
+
+func TestValidateIdentifier(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		valid := []string{"threads", "记事", "user_id", "a1"}
+		for _, v := range valid {
+			if err := validateIdentifier(v, "field"); err != nil {
+				t.Errorf("validateIdentifier(%q) returned error: %v", v, err)
+			}
+		}
+	})
+
+	t.Run("empty rejected", func(t *testing.T) {
+		err := validateIdentifier("", "table name")
+		if err == nil {
+			t.Fatal("expected error for empty value")
+		}
+		if !strings.Contains(err.Error(), "table name") {
+			t.Errorf("error should mention field name, got: %v", err)
+		}
+	})
+
+	t.Run("whitespace rejected", func(t *testing.T) {
+		cases := []string{"a b", " a", "a ", "a　b"}
+		for _, v := range cases {
+			err := validateIdentifier(v, "field")
+			if err == nil {
+				t.Errorf("expected error for whitespace in %q", v)
+				continue
+			}
+			// Tab is also a control char so it can hit either path.
+		}
+	})
+
+	t.Run("control character rejected", func(t *testing.T) {
+		cases := []string{"a\x00b", "a\nb", "a\rb", "a\tb", "a\x7fb"}
+		for _, v := range cases {
+			if err := validateIdentifier(v, "field"); err == nil {
+				t.Errorf("expected error for control char in %q", v)
+			}
+		}
+	})
+
+	t.Run("field name in error", func(t *testing.T) {
+		err := validateIdentifier("a b", "filter key")
+		if err == nil || !strings.Contains(err.Error(), "filter key") {
+			t.Errorf("error should mention 'filter key', got: %v", err)
+		}
+	})
+}
+
+func TestEscapeQueryString(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", `""`},
+		{"simple word", "hello", "hello"},
+		{"unicode passthrough", "こんにちは", "こんにちは"},
+		{"with space", "hello world", `"hello world"`},
+		{"with single quote", "it's", `"it's"`},
+		{"with double quote", `say "hi"`, `"say \"hi\""`},
+		{"with backslash", `a\b c`, `"a\\b c"`},
+		{"control chars dropped when quoted", "a\x00b c", `"ab c"`},
+		{"tab triggers quoting", "a\tb", `"ab"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeQueryString(tt.in); got != tt.want {
+				t.Errorf("escapeQueryString(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
