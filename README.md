@@ -177,12 +177,34 @@ for _, v := range resp.Results {
 ## Development
 
 ```bash
-make test       # Run tests
-make test-race  # Run tests with race detector
+make test       # Run unit tests
+make test-race  # Run unit tests with race detector
+make test-e2e   # Run e2e tests against a live MygramDB server
 make lint       # Run golangci-lint
 make fmt        # Format code
 make coverage   # Generate coverage report
 ```
+
+### End-to-end tests
+
+`make test-e2e` exercises every public method against a running MygramDB
+instance. Tests are gated by the `e2e` build tag, so the default
+`go test ./...` (and CI) never connect to a server.
+
+```bash
+# Default: connect to 127.0.0.1:11016
+make test-e2e
+
+# Override the endpoint
+MYGRAM_HOST=db.example.com MYGRAM_PORT=11016 make test-e2e
+
+# Skip side-effect heavy suites
+MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
+```
+
+If the server is unreachable, every e2e test is skipped (not failed).
+Suites that mutate global server state (replication start/stop, cache
+toggle, dump round-trip) restore the original state on exit.
 
 ## License
 
