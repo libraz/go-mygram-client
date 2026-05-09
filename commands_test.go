@@ -355,13 +355,13 @@ func TestDumpInfo(t *testing.T) {
 func TestCacheStats(t *testing.T) {
 	// Server emits `OK CACHE_STATS\r\n\r\n` followed by key: value lines.
 	response := "OK CACHE_STATS\r\n\r\n" +
-		"cache_enabled: 1\r\n" +
+		"enabled: true\r\n" +
 		"cache_hits: 120\r\n" +
 		"cache_misses: 30\r\n" +
-		"cache_hit_rate: 0.8000\r\n" +
-		"cache_current_entries: 42\r\n" +
-		"cache_memory_bytes: 1048576\r\n" +
-		"cache_evictions: 5\r\n" +
+		"hit_rate: 0.8000\r\n" +
+		"current_entries: 42\r\n" +
+		"current_memory_bytes: 1048576\r\n" +
+		"evictions: 5\r\n" +
 		"\r\n"
 	srv, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
@@ -404,7 +404,7 @@ func TestCacheStats(t *testing.T) {
 }
 
 func TestCacheStatsDisabled(t *testing.T) {
-	response := "OK CACHE_STATS\r\n\r\ncache_enabled: 0\r\n\r\n"
+	response := "OK CACHE_STATS\r\n\r\nenabled: false\r\n\r\n"
 	_, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
 

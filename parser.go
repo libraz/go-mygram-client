@@ -367,19 +367,19 @@ func parseCacheStatsResponse(response string) (*CacheStats, error) {
 		value := strings.TrimSpace(trimmed[idx+1:])
 
 		switch key {
-		case "cache_enabled":
-			cs.Enabled = value == "1"
+		case "enabled":
+			cs.Enabled = value == "true"
 		case "cache_hits":
 			cs.Hits, _ = strconv.Atoi(value)
 		case "cache_misses":
 			cs.Misses, _ = strconv.Atoi(value)
-		case "cache_hit_rate":
+		case "hit_rate":
 			cs.HitRate, _ = strconv.ParseFloat(value, 64)
-		case "cache_current_entries":
+		case "current_entries":
 			cs.CurrentEntries, _ = strconv.Atoi(value)
-		case "cache_memory_bytes":
+		case "current_memory_bytes":
 			cs.MemoryBytes, _ = strconv.Atoi(value)
-		case "cache_evictions":
+		case "evictions":
 			cs.Evictions, _ = strconv.Atoi(value)
 		}
 	}
