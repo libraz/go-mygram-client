@@ -1,0 +1,99 @@
+# MygramDB config for the self-contained docker-compose e2e.
+# Mounted into the mygramdb container at /etc/mygramdb/config.yaml and run with
+# `mygramdb -c` (SKIP_CONFIG_GEN=true bypasses the image's env-based generator).
+
+mysql:
+  host: "mysql"            # docker-compose service name
+  port: 3306
+  user: "repl_user"
+  password: "test_password"
+  database: "testdb"
+  use_gtid: true
+  connect_timeout_ms: 5000
+  datetime_timezone: "+00:00"
+
+tables:
+  - name: "articles"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    required_filters:
+      - name: "enabled"
+        type: "int"
+        op: "="
+        value: 1
+        bitmap_index: false
+    filters:
+      - name: "status"
+        type: "int"
+      - name: "category"
+        type: "string"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+  - name: "products"
+    primary_key: "id"
+    text_source:
+      column: "description"
+    required_filters:
+      - name: "enabled"
+        type: "int"
+        op: "="
+        value: 1
+        bitmap_index: false
+    filters:
+      - name: "status"
+        type: "int"
+      - name: "category"
+        type: "string"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+build:
+  batch_size: 5000
+  parallelism: 2
+
+replication:
+  enable: true
+  server_id: 99001
+  start_from: "snapshot"
+
+memory:
+  hard_limit_mb: 256
+  soft_target_mb: 200
+  # Enable text verification so HIGHLIGHT and `_score` (BM25) sorting work.
+  verify_text: "all"
+  normalize:
+    nfkc: true
+    width: "narrow"
+    lower: false
+
+dump:
+  # Use the image's existing, writable working directory (the env-based config
+  # generator is bypassed here, so no dumps subdir is pre-created).
+  dir: "/var/lib/mygramdb"
+  interval_sec: 0
+
+api:
+  tcp:
+    bind: "0.0.0.0"
+    port: 11016
+  http:
+    enable: true
+    bind: "0.0.0.0"
+    port: 8080
+
+network:
+  allow_cidrs:
+    - "0.0.0.0/0"
+
+logging:
+  level: "info"
+  format: "json"
+  file: ""
+
+cache:
+  enabled: true
+
+bm25:
+  enable: true

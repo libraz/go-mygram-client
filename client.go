@@ -234,6 +234,7 @@ var endTerminatedPrefixes = []endTerminatedPrefix{
 	{"OK REPLICATION", true},
 	{"OK CACHE_STATS", true},
 	{"OK DUMP_STATUS", true},
+	{"OK SYNC_STATUS", true},
 	{"OK DUMP_INFO", false},
 }
 
@@ -389,32 +390,13 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		parts = append(parts, "FUZZY", strconv.Itoa(opts.Fuzzy))
 	}
 
-	if opts.Highlight != nil {
-		parts = append(parts, "HIGHLIGHT")
-		h := opts.Highlight
-		if h.OpenTag != "" || h.CloseTag != "" {
-			parts = append(parts, "TAG", h.OpenTag, h.CloseTag)
-		}
-		if h.SnippetLen > 0 {
-			parts = append(parts, "SNIPPET_LEN", strconv.Itoa(h.SnippetLen))
-		}
-		if h.MaxFragments > 0 {
-			parts = append(parts, "MAX_FRAGMENTS", strconv.Itoa(h.MaxFragments))
-		}
-	}
+	appendHighlightClause(&parts, opts.Highlight)
 
-	switch {
-	case opts.Offset > 0 && opts.Limit > 0:
-		parts = append(parts, "LIMIT", fmt.Sprintf("%d,%d", opts.Offset, opts.Limit))
-	case opts.Offset > 0:
-		// offset > 0 with limit == 0: emit a bare OFFSET clause so the server
-		// actually skips records instead of returning the first page.
-		parts = append(parts, "OFFSET", strconv.Itoa(opts.Offset))
-	case opts.Limit > 0:
-		parts = append(parts, "LIMIT", strconv.Itoa(opts.Limit))
-	default:
+	if opts.Limit == 0 && opts.Offset == 0 {
 		// Both zero: preserve historical default of LIMIT 1000.
 		parts = append(parts, "LIMIT", "1000")
+	} else {
+		appendLimitOffset(&parts, opts.Limit, opts.Offset)
 	}
 
 	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))
@@ -422,6 +404,109 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		return nil, err
 	}
 	return parseSearchResponse(response)
+}
+
+// SearchWithHighlights is a Search variant that requests highlighted snippets.
+// Any highlight options passed in opts are preserved; otherwise server
+// defaults are used. Snippets are returned in SearchResult.Snippet. Requires
+// MygramDB >= v1.6.
+func (c *Client) SearchWithHighlights(table, query string, opts SearchOptions) (*SearchResponse, error) {
+	return c.SearchWithHighlightsContext(context.Background(), table, query, opts)
+}
+
+// SearchWithHighlightsContext is the context-aware variant of SearchWithHighlights.
+func (c *Client) SearchWithHighlightsContext(ctx context.Context, table, query string, opts SearchOptions) (*SearchResponse, error) {
+	if opts.Highlight == nil {
+		opts.Highlight = &HighlightOptions{}
+	}
+	return c.SearchContext(ctx, table, query, opts)
+}
+
+// SearchRaw searches using a pre-built boolean expression (MygramDB >= v1.7).
+//
+// The expression is sent as one quoted token so the server's AST parser can
+// interpret AND / OR / NOT / parentheses. Pair this with ConvertSearchExpression
+// to preserve OR / grouping semantics that Search's AND/NOT decomposition
+// cannot express.
+func (c *Client) SearchRaw(table, rawQuery string, opts SearchRawOptions) (*SearchResponse, error) {
+	return c.SearchRawContext(context.Background(), table, rawQuery, opts)
+}
+
+// SearchRawContext is the context-aware variant of SearchRaw.
+func (c *Client) SearchRawContext(ctx context.Context, table, rawQuery string, opts SearchRawOptions) (*SearchResponse, error) {
+	if err := validateTableName(table); err != nil {
+		return nil, err
+	}
+	if rawQuery == "" {
+		return nil, &ValidationError{Message: "rawQuery must not be empty"}
+	}
+	if err := ensureSafeValue(rawQuery, "rawQuery"); err != nil {
+		return nil, err
+	}
+	if err := validateHighlight(opts.Highlight); err != nil {
+		return nil, err
+	}
+
+	parts := []string{"SEARCH", table, escapeQueryString(rawQuery)}
+	appendHighlightClause(&parts, opts.Highlight)
+	appendLimitOffset(&parts, opts.Limit, opts.Offset)
+
+	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))
+	if err != nil {
+		return nil, err
+	}
+	return parseSearchResponse(response)
+}
+
+// SearchRawWithHighlights is a SearchRaw variant that requests highlighted
+// snippets. Any highlight options passed in opts are preserved; otherwise
+// server defaults are used.
+func (c *Client) SearchRawWithHighlights(table, rawQuery string, opts SearchRawOptions) (*SearchResponse, error) {
+	return c.SearchRawWithHighlightsContext(context.Background(), table, rawQuery, opts)
+}
+
+// SearchRawWithHighlightsContext is the context-aware variant of SearchRawWithHighlights.
+func (c *Client) SearchRawWithHighlightsContext(ctx context.Context, table, rawQuery string, opts SearchRawOptions) (*SearchResponse, error) {
+	if opts.Highlight == nil {
+		opts.Highlight = &HighlightOptions{}
+	}
+	return c.SearchRawContext(ctx, table, rawQuery, opts)
+}
+
+// appendHighlightClause appends the HIGHLIGHT clause (and its TAG /
+// SNIPPET_LEN / MAX_FRAGMENTS sub-options) when highlight options are present.
+func appendHighlightClause(parts *[]string, h *HighlightOptions) {
+	if h == nil {
+		return
+	}
+	*parts = append(*parts, "HIGHLIGHT")
+	if h.OpenTag != "" || h.CloseTag != "" {
+		*parts = append(*parts, "TAG", h.OpenTag, h.CloseTag)
+	}
+	if h.SnippetLen > 0 {
+		*parts = append(*parts, "SNIPPET_LEN", strconv.Itoa(h.SnippetLen))
+	}
+	if h.MaxFragments > 0 {
+		*parts = append(*parts, "MAX_FRAGMENTS", strconv.Itoa(h.MaxFragments))
+	}
+}
+
+// appendLimitOffset appends the LIMIT / OFFSET clause, matching the C++
+// client's AppendLimitOffset:
+//
+//   - limit > 0 and offset > 0 emits the atomic "LIMIT <offset>,<limit>".
+//   - limit > 0 and offset == 0 emits "LIMIT <limit>".
+//   - limit == 0 and offset > 0 emits a bare "OFFSET <offset>" so the server
+//     still skips the first <offset> results.
+func appendLimitOffset(parts *[]string, limit, offset int) {
+	switch {
+	case limit > 0 && offset > 0:
+		*parts = append(*parts, "LIMIT", fmt.Sprintf("%d,%d", offset, limit))
+	case limit > 0:
+		*parts = append(*parts, "LIMIT", strconv.Itoa(limit))
+	case offset > 0:
+		*parts = append(*parts, "OFFSET", strconv.Itoa(offset))
+	}
 }
 
 // Facet aggregates distinct values of a filter column with their document
@@ -642,7 +727,11 @@ func (c *Client) DumpSave(filepath string) (string, error) {
 func (c *Client) DumpSaveContext(ctx context.Context, filepath string) (string, error) {
 	cmd := "DUMP SAVE"
 	if filepath != "" {
-		cmd += " " + filepath
+		safe, err := quoteCommandArgument(filepath, "filepath")
+		if err != nil {
+			return "", err
+		}
+		cmd += " " + safe
 	}
 	return c.SendCommandContext(ctx, cmd)
 }
@@ -656,7 +745,11 @@ func (c *Client) DumpLoad(filepath string) error {
 func (c *Client) DumpLoadContext(ctx context.Context, filepath string) error {
 	cmd := "DUMP LOAD"
 	if filepath != "" {
-		cmd += " " + filepath
+		safe, err := quoteCommandArgument(filepath, "filepath")
+		if err != nil {
+			return err
+		}
+		cmd += " " + safe
 	}
 	_, err := c.SendCommandContext(ctx, cmd)
 	return err
@@ -683,7 +776,11 @@ func (c *Client) DumpVerify(filepath string) (string, error) {
 
 // DumpVerifyContext verifies the integrity of a dump file with the given context.
 func (c *Client) DumpVerifyContext(ctx context.Context, filepath string) (string, error) {
-	return c.SendCommandContext(ctx, "DUMP VERIFY "+filepath)
+	safe, err := quoteCommandArgument(filepath, "filepath")
+	if err != nil {
+		return "", err
+	}
+	return c.SendCommandContext(ctx, "DUMP VERIFY "+safe)
 }
 
 // DumpInfo retrieves metadata of a dump file.
@@ -693,7 +790,11 @@ func (c *Client) DumpInfo(filepath string) (string, error) {
 
 // DumpInfoContext retrieves metadata of a dump file with the given context.
 func (c *Client) DumpInfoContext(ctx context.Context, filepath string) (string, error) {
-	return c.SendCommandContext(ctx, "DUMP INFO "+filepath)
+	safe, err := quoteCommandArgument(filepath, "filepath")
+	if err != nil {
+		return "", err
+	}
+	return c.SendCommandContext(ctx, "DUMP INFO "+safe)
 }
 
 // CacheStats retrieves cache statistics.
@@ -760,4 +861,85 @@ func (c *Client) OptimizeContext(ctx context.Context, table string) error {
 	}
 	_, err := c.SendCommandContext(ctx, cmd)
 	return err
+}
+
+// SetVariable sets a runtime variable (MygramDB >= v1.7, MySQL-compatible SET).
+func (c *Client) SetVariable(name, value string) error {
+	return c.SetVariableContext(context.Background(), name, value)
+}
+
+// SetVariableContext sets a runtime variable with the given context.
+func (c *Client) SetVariableContext(ctx context.Context, name, value string) error {
+	if err := validateIdentifier(name, "name"); err != nil {
+		return err
+	}
+	safeValue, err := quoteCommandArgument(value, "value")
+	if err != nil {
+		return err
+	}
+	_, err = c.SendCommandContext(ctx, fmt.Sprintf("SET %s = %s", name, safeValue))
+	return err
+}
+
+// ShowVariables shows runtime variables (MygramDB >= v1.7, MySQL-compatible
+// SHOW VARIABLES). An empty likePattern lists every variable; a non-empty
+// pattern is matched MySQL-style (e.g. "logging%"). The raw server response is
+// returned unparsed.
+func (c *Client) ShowVariables(likePattern string) (string, error) {
+	return c.ShowVariablesContext(context.Background(), likePattern)
+}
+
+// ShowVariablesContext is the context-aware variant of ShowVariables.
+func (c *Client) ShowVariablesContext(ctx context.Context, likePattern string) (string, error) {
+	if likePattern == "" {
+		return c.SendCommandContext(ctx, "SHOW VARIABLES")
+	}
+	safe, err := quoteCommandArgument(likePattern, "likePattern")
+	if err != nil {
+		return "", err
+	}
+	return c.SendCommandContext(ctx, "SHOW VARIABLES LIKE "+safe)
+}
+
+// Sync starts an on-demand sync (full reload) of a table (MygramDB >= v1.7).
+// The raw server acknowledgement is returned.
+func (c *Client) Sync(table string) (string, error) {
+	return c.SyncContext(context.Background(), table)
+}
+
+// SyncContext is the context-aware variant of Sync.
+func (c *Client) SyncContext(ctx context.Context, table string) (string, error) {
+	if err := validateTableName(table); err != nil {
+		return "", err
+	}
+	return c.SendCommandContext(ctx, "SYNC "+table)
+}
+
+// SyncStatus retrieves the status of in-flight and recent sync operations
+// (MygramDB >= v1.7). The raw SYNC_STATUS report is returned unparsed.
+func (c *Client) SyncStatus() (string, error) {
+	return c.SyncStatusContext(context.Background())
+}
+
+// SyncStatusContext is the context-aware variant of SyncStatus.
+func (c *Client) SyncStatusContext(ctx context.Context) (string, error) {
+	return c.SendCommandContext(ctx, "SYNC STATUS")
+}
+
+// SyncStop stops a running sync (MygramDB >= v1.7). With an empty table, every
+// in-flight sync is stopped; with a table, only that table's sync is stopped.
+func (c *Client) SyncStop(table string) (string, error) {
+	return c.SyncStopContext(context.Background(), table)
+}
+
+// SyncStopContext is the context-aware variant of SyncStop.
+func (c *Client) SyncStopContext(ctx context.Context, table string) (string, error) {
+	cmd := "SYNC STOP"
+	if table != "" {
+		if err := validateTableName(table); err != nil {
+			return "", err
+		}
+		cmd += " " + table
+	}
+	return c.SendCommandContext(ctx, cmd)
 }

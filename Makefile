@@ -1,4 +1,4 @@
-.PHONY: all test test-race test-e2e lint fmt vet check coverage clean
+.PHONY: all test test-race test-e2e test-e2e-docker lint fmt vet check coverage clean
 
 all: check test
 
@@ -14,6 +14,12 @@ test-race:
 #   MYGRAM_E2E_SKIP_DUMP=1 / MYGRAM_E2E_SKIP_REPLICATION=1
 test-e2e:
 	go test -tags=e2e -count=1 -v ./...
+
+# Spin up a throwaway MySQL + MygramDB stack (docker compose), run the e2e
+# suite against it with the deterministic seed, then tear it down.
+# Knobs: MYGRAMDB_VERSION, MYSQL_VERSION, MYGRAM_PORT, MYGRAM_HTTP_PORT, KEEP_UP.
+test-e2e-docker:
+	bash e2e/docker/run-e2e.sh
 
 lint:
 	golangci-lint run ./...

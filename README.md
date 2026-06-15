@@ -10,7 +10,9 @@
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-Compatible with MygramDB v1.6 (BM25 scoring, HIGHLIGHT, FUZZY, FACET).
+Compatible with MygramDB v1.7 (database-qualified tables, raw boolean search,
+runtime variables, on-demand sync) and v1.6 (BM25 scoring, HIGHLIGHT, FUZZY,
+FACET).
 
 ## Overview
 
@@ -174,12 +176,60 @@ for _, v := range resp.Results {
 }
 ```
 
+## MygramDB v1.7 Features
+
+### Database-qualified table identity
+
+A single MygramDB instance can index same-named tables from different databases.
+Reference a table as `database.table` (e.g. `app_db.articles`); on a
+single-database server a bare name keeps working unchanged.
+
+```go
+// Build / parse identities explicitly when needed:
+id, _ := mygram.QualifyTableIdentity("articles", "app_db") // "app_db.articles"
+db, table, _ := mygram.ParseTableIdentity("app_db.articles") // "app_db", "articles"
+
+// Any table argument accepts a qualified identity:
+resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
+```
+
+### Raw boolean search
+
+`Search` decomposes into AND/NOT clauses, which cannot express `OR` or grouping.
+`SearchRaw` sends a pre-built boolean expression as a single token so the server
+parses `AND` / `OR` / `NOT` / parentheses. Pair it with `ConvertSearchExpression`:
+
+```go
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
+
+// Snippet-returning variants:
+resp, _ = client.SearchWithHighlights("articles", "golang", mygram.SearchOptions{})
+resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
+```
+
+### Runtime variables (SET / SHOW VARIABLES)
+
+```go
+_ = client.SetVariable("logging.level", "debug")
+out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
+```
+
+### On-demand sync
+
+```go
+_, _ = client.Sync("articles")     // start a full reload of one table
+status, _ := client.SyncStatus()   // raw SYNC_STATUS report
+_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
+```
+
 ## Development
 
 ```bash
 make test       # Run unit tests
 make test-race  # Run unit tests with race detector
 make test-e2e   # Run e2e tests against a live MygramDB server
+make test-e2e-docker # Spin up MySQL + MygramDB (docker compose), run e2e, tear down
 make lint       # Run golangci-lint
 make fmt        # Format code
 make coverage   # Generate coverage report
@@ -205,6 +255,16 @@ MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
 If the server is unreachable, every e2e test is skipped (not failed).
 Suites that mutate global server state (replication start/stop, cache
 toggle, dump round-trip) restore the original state on exit.
+
+#### Self-contained docker-compose stack
+
+`make test-e2e-docker` brings up a throwaway **MySQL + MygramDB** stack (the
+server is pulled from `ghcr.io/libraz/mygram-db`), seeds it with a deterministic
+dataset, runs the e2e suite with `MYGRAM_E2E_SEEDED=1`, then tears everything
+down. No local server is required. See [`e2e/docker/`](e2e/docker/README.md) for
+knobs (`MYGRAMDB_VERSION`, `KEEP_UP`, ports). The `TestE2ESeeded` block asserts
+exact result sets (database-qualified identity, phrase + required-filter
+visibility, Japanese ngram matching, `SearchRaw` OR, facet counts).
 
 ## License
 

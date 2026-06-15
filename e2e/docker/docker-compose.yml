@@ -1,0 +1,63 @@
+# Self-contained e2e stack for the MygramDB Go client.
+#
+# Brings up MySQL (seeded with a fixed dataset) and a MygramDB server that
+# replicates from it, so `go test -tags=e2e` can run against a real server with
+# deterministic data. Nothing outside this directory is required — the server
+# is pulled as a published image.
+#
+#   docker compose -f e2e/docker/docker-compose.yml up -d --wait
+#   MYGRAM_E2E_SEEDED=1 go test -tags=e2e -count=1 ./...
+#   docker compose -f e2e/docker/docker-compose.yml down -v
+#
+# Override the server version with MYGRAMDB_VERSION (defaults to the v1.7 line).
+
+services:
+  mysql:
+    image: mysql:${MYSQL_VERSION:-8.4}
+    container_name: mygram_e2e_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-test_root_password}
+      MYSQL_DATABASE: testdb
+      MYSQL_USER: repl_user
+      MYSQL_PASSWORD: test_password
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Use TCP (127.0.0.1), not the socket, so the probe only passes once the
+      # real server is up — the temporary init-time server is socket-only, so a
+      # socket ping would go green before the seed scripts have finished.
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h 127.0.0.1 -u root"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  mygramdb:
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.7.0}
+    container_name: mygram_e2e_server
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      # Use the mounted config verbatim instead of the image's env-based generator.
+      SKIP_CONFIG_GEN: "true"
+    command: ["mygramdb", "-c", "/etc/mygramdb/config.yaml"]
+    volumes:
+      - ./mygramdb.yaml:/etc/mygramdb/config.yaml:ro
+    ports:
+      - "${MYGRAM_PORT:-11016}:11016"   # TCP protocol (used by the client)
+      - "${MYGRAM_HTTP_PORT:-18080}:8080"  # HTTP API / health probes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s

@@ -680,3 +680,186 @@ func TestE2EReplicationToggle(t *testing.T) {
 	}
 	t.Errorf("replication Running flag did not change from %v within 2s", before.Running)
 }
+
+// -----------------------------------------------------------------------------
+// v1.7 protocol surfaces (version-agnostic round-trips)
+// -----------------------------------------------------------------------------
+
+func TestE2ESearchRaw(t *testing.T) {
+	c := newE2EClient(t)
+	table := firstTable(t, c)
+	// A boolean OR expression sent as a single token; tolerate servers that
+	// reject the clause so the test proves the client round-trips it.
+	if _, err := c.SearchRaw(table, "test OR example", SearchRawOptions{Limit: 5}); err != nil && !isProtocolError(err) {
+		t.Fatalf("SearchRaw: %v", err)
+	}
+}
+
+func TestE2EShowVariables(t *testing.T) {
+	c := newE2EClient(t)
+	out, err := c.ShowVariables("")
+	if err != nil {
+		if isProtocolError(err) {
+			t.Skipf("SHOW VARIABLES not supported on this server: %v", err)
+		}
+		t.Fatalf("ShowVariables: %v", err)
+	}
+	if out == "" {
+		t.Error("ShowVariables returned empty response")
+	}
+
+	// Pattern variant should also round-trip.
+	if _, err := c.ShowVariables("logging%"); err != nil && !isProtocolError(err) {
+		t.Fatalf("ShowVariables LIKE: %v", err)
+	}
+}
+
+func TestE2ESetVariable(t *testing.T) {
+	c := newE2EClient(t)
+	// logging.level is a commonly settable runtime variable; tolerate servers
+	// that do not expose it.
+	if err := c.SetVariable("logging.level", "info"); err != nil && !isProtocolError(err) {
+		t.Fatalf("SetVariable: %v", err)
+	}
+}
+
+func TestE2ESyncFamily(t *testing.T) {
+	c := newE2EClient(t)
+	table := firstTable(t, c)
+
+	// SYNC STATUS is a read-only probe and should always frame correctly.
+	if _, err := c.SyncStatus(); err != nil && !isProtocolError(err) {
+		t.Fatalf("SyncStatus: %v", err)
+	}
+
+	// SYNC / SYNC STOP mutate server state; tolerate protocol errors but make
+	// sure we stop any sync we may have started.
+	if _, err := c.Sync(table); err != nil && !isProtocolError(err) {
+		t.Fatalf("Sync: %v", err)
+	}
+	t.Cleanup(func() { _, _ = c.SyncStop(table) })
+}
+
+// -----------------------------------------------------------------------------
+// seeded dataset (docker e2e) — gated by MYGRAM_E2E_SEEDED=1
+//
+// These assertions require the deterministic dataset created by the
+// docker-compose harness under e2e/docker/. Without the seed they would fail
+// against an arbitrary server, so they only run when MYGRAM_E2E_SEEDED=1.
+// -----------------------------------------------------------------------------
+
+// collectPKs runs a search and returns the matched primary keys as a set.
+func collectPKs(t *testing.T, c *Client, table, query string, opts SearchOptions) map[string]bool {
+	t.Helper()
+	resp, err := c.Search(table, query, opts)
+	if err != nil {
+		t.Fatalf("Search %q: %v", query, err)
+	}
+	set := make(map[string]bool, len(resp.Results))
+	for _, r := range resp.Results {
+		set[r.PrimaryKey] = true
+	}
+	return set
+}
+
+func assertPKSet(t *testing.T, got map[string]bool, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("primary key set = %v, want %v", keysOf(got), want)
+		return
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("primary key set %v missing %q", keysOf(got), w)
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func TestE2ESeeded(t *testing.T) {
+	if os.Getenv("MYGRAM_E2E_SEEDED") != "1" {
+		t.Skip("MYGRAM_E2E_SEEDED != 1; run via e2e/docker harness")
+	}
+	c := newE2EClient(t)
+	const table = "articles"
+
+	t.Run("bare and qualified identity resolve identically", func(t *testing.T) {
+		bare := collectPKs(t, c, table, "python", SearchOptions{})
+		qualified := collectPKs(t, c, "testdb.articles", "python", SearchOptions{})
+		assertPKSet(t, bare, "3")
+		assertPKSet(t, qualified, "3")
+	})
+
+	t.Run("phrase search with required filter", func(t *testing.T) {
+		// id 6 ("machine learning hidden disabled") is enabled=0 and hidden.
+		got := collectPKs(t, c, table, "machine learning", SearchOptions{})
+		assertPKSet(t, got, "3")
+	})
+
+	t.Run("searchRaw boolean OR", func(t *testing.T) {
+		resp, err := c.SearchRaw(table, "ruby OR python", SearchRawOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchRaw: %v", err)
+		}
+		got := make(map[string]bool, len(resp.Results))
+		for _, r := range resp.Results {
+			got[r.PrimaryKey] = true
+		}
+		assertPKSet(t, got, "2", "3")
+	})
+
+	t.Run("japanese ngram match", func(t *testing.T) {
+		got := collectPKs(t, c, table, "機械学習", SearchOptions{})
+		assertPKSet(t, got, "1", "5")
+	})
+
+	t.Run("count golang", func(t *testing.T) {
+		resp, err := c.Count(table, "golang", CountOptions{})
+		if err != nil {
+			t.Fatalf("Count: %v", err)
+		}
+		if resp.Count != 1 {
+			t.Errorf("Count golang = %d, want 1", resp.Count)
+		}
+	})
+
+	t.Run("facet by category", func(t *testing.T) {
+		resp, err := c.Facet(table, "category", FacetOptions{})
+		if err != nil {
+			t.Fatalf("Facet: %v", err)
+		}
+		counts := make(map[string]int64, len(resp.Results))
+		for _, v := range resp.Results {
+			counts[v.Value] = v.Count
+		}
+		if counts["tech"] != 3 {
+			t.Errorf("facet tech = %d, want 3", counts["tech"])
+		}
+		if counts["science"] != 2 {
+			t.Errorf("facet science = %d, want 2", counts["science"])
+		}
+	})
+
+	t.Run("searchWithHighlights wraps snippet", func(t *testing.T) {
+		resp, err := c.SearchWithHighlights(table, "python", SearchOptions{})
+		if err != nil {
+			if isProtocolError(err) {
+				t.Skipf("highlight not available: %v", err)
+			}
+			t.Fatalf("SearchWithHighlights: %v", err)
+		}
+		if len(resp.Results) == 0 {
+			t.Fatal("no results for highlighted python search")
+		}
+		if !strings.Contains(resp.Results[0].Snippet, "python") {
+			t.Errorf("snippet %q does not contain matched term", resp.Results[0].Snippet)
+		}
+	})
+}

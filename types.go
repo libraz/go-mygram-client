@@ -94,6 +94,24 @@ type HighlightOptions struct {
 	MaxFragments int
 }
 
+// SearchRawOptions holds options for a raw search request that sends a
+// pre-built boolean expression as a single token. Introduced in MygramDB
+// v1.7. Unlike SearchOptions, a raw search exposes only pagination and
+// highlight controls — AND/NOT/FILTER refinements belong inside the
+// expression itself.
+type SearchRawOptions struct {
+	// Limit is the maximum number of results to return. 0 means the server
+	// default.
+	Limit int
+
+	// Offset is the number of results to skip. Default is 0.
+	Offset int
+
+	// Highlight, when non-nil, enables the HIGHLIGHT clause so that matching
+	// snippets are returned alongside each primary key.
+	Highlight *HighlightOptions
+}
+
 // CountOptions holds options for a count request.
 type CountOptions struct {
 	// AndTerms is a list of additional keywords combined with AND.

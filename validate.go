@@ -178,24 +178,28 @@ func validatePrimaryKey(pk string) error {
 	return nil
 }
 
-// escapeQueryString quotes and escapes a free-form value for use as a wire
-// token.
+// quoteTokenIfNeeded wraps a value in double quotes when it would otherwise
+// split into multiple protocol tokens, escaping the characters that are
+// special inside a quoted token.
 //
-// Empty strings are emitted as the explicit "" token to keep the wire form
-// unambiguous: an unquoted empty arg would collapse into surrounding
-// whitespace and produce a malformed command (e.g. "SEARCH table  AND foo").
+// This mirrors the C++ client's EscapeQueryString / QuoteCommandArgumentIfNeeded:
+// a value is quoted when it is empty or contains whitespace or a quote
+// character. Inside the quotes, '"' and '\' are backslash-escaped and any
+// remaining control characters (code < 0x20) are dropped. Values that need no
+// quoting are returned verbatim so simple single-token queries stay
+// byte-identical on the wire.
 //
-// Values containing whitespace, double quotes or single quotes are wrapped
-// in double quotes with internal quotes/backslashes escaped. Control
-// characters are stripped to prevent command injection.
-func escapeQueryString(value string) string {
+// quoteOnBackslash selects which upstream helper is mirrored: query strings
+// follow EscapeQueryString (a lone backslash does NOT force quoting), while
+// command arguments follow QuoteCommandArgumentIfNeeded (a backslash does).
+func quoteTokenIfNeeded(value string, quoteOnBackslash bool) string {
 	if value == "" {
 		return `""`
 	}
 
 	needsQuotes := false
 	for _, r := range value {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' || (quoteOnBackslash && r == '\\') {
 			needsQuotes = true
 			break
 		}
@@ -221,6 +225,88 @@ func escapeQueryString(value string) string {
 	}
 	sb.WriteByte('"')
 	return sb.String()
+}
+
+// escapeQueryString quotes and escapes a free-form query value for use as a
+// wire token.
+//
+// Empty strings are emitted as the explicit "" token to keep the wire form
+// unambiguous: an unquoted empty arg would collapse into surrounding
+// whitespace and produce a malformed command (e.g. "SEARCH table  AND foo").
+//
+// Values containing whitespace, double quotes or single quotes are wrapped
+// in double quotes with internal quotes/backslashes escaped. Control
+// characters are stripped to prevent command injection. A lone backslash does
+// not force quoting, matching the C++ client's EscapeQueryString.
+func escapeQueryString(value string) string {
+	return quoteTokenIfNeeded(value, false)
+}
+
+// quoteCommandArgument quotes a free-form command argument (e.g. a SET value,
+// a SHOW VARIABLES LIKE pattern, or a DUMP filepath) when it contains
+// whitespace, quote characters or a backslash. Mirrors the C++ client's
+// QuoteCommandArgumentIfNeeded.
+//
+// Unlike escapeQueryString, the value is validated for control characters
+// first (returning an error rather than silently stripping them); an empty
+// value is allowed and surfaced as the explicit empty token "".
+func quoteCommandArgument(value, fieldName string) (string, error) {
+	if value != "" {
+		if err := ensureSafeValue(value, fieldName); err != nil {
+			return "", err
+		}
+	}
+	return quoteTokenIfNeeded(value, true), nil
+}
+
+// QualifyTableIdentity builds a database-qualified table identity
+// ("database.table") for MygramDB v1.7+ multi-database deployments.
+//
+// A single-database deployment continues to accept a bare table name, so an
+// empty database returns just the validated table name. When a database is
+// supplied, both parts are validated as identifiers and must not themselves
+// contain a '.' separator; they are then joined as "database.table".
+func QualifyTableIdentity(table, database string) (string, error) {
+	if err := validateIdentifier(table, "table"); err != nil {
+		return "", err
+	}
+	if database == "" {
+		return table, nil
+	}
+	if err := validateIdentifier(database, "database"); err != nil {
+		return "", err
+	}
+	if strings.Contains(database, ".") {
+		return "", &ValidationError{Message: "input for database must not contain a '.' separator"}
+	}
+	if strings.Contains(table, ".") {
+		return "", &ValidationError{Message: "input for table must not contain a '.' when a database is supplied separately"}
+	}
+	return database + "." + table, nil
+}
+
+// ParseTableIdentity splits a (possibly database-qualified) table identity
+// into its parts.
+//
+// Bare names return an empty database and the table name; qualified names are
+// split on the first '.' so "app_db.articles" yields ("app_db", "articles").
+// The identity is validated as a protocol identifier first.
+func ParseTableIdentity(identity string) (database, table string, err error) {
+	if err := validateIdentifier(identity, "table"); err != nil {
+		return "", "", err
+	}
+	dot := strings.IndexByte(identity, '.')
+	if dot == -1 {
+		return "", identity, nil
+	}
+	database = identity[:dot]
+	table = identity[dot+1:]
+	if database == "" || table == "" {
+		return "", "", &ValidationError{
+			Message: fmt.Sprintf("invalid table identity %q: expected <database>.<table>", identity),
+		}
+	}
+	return database, table, nil
 }
 
 // validateFuzzy validates a fuzzy edit distance. The server accepts 1 or 2;
