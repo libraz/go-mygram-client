@@ -1,5 +1,7 @@
 package mygram
 
+import "time"
+
 // ClientConfig holds connection settings for the MygramDB server.
 type ClientConfig struct {
 	// Host is the server hostname or IP address. Default is "127.0.0.1".
@@ -12,6 +14,10 @@ type ClientConfig struct {
 	SocketPath string
 
 	// TimeoutMs is the command timeout in milliseconds. Default is 5000.
+	//
+	// This field is milliseconds (an int) for parity with the other language
+	// clients. The pool-level limits (PoolConfig.ConnMaxLifetime and friends)
+	// are time.Duration; mind the difference when configuring both.
 	TimeoutMs int
 
 	// RecvBufferSize is the receive buffer size. Default is 65536.
@@ -19,16 +25,48 @@ type ClientConfig struct {
 
 	// MaxQueryLength is the maximum length of a query expression. 0 means unlimited. Default is 128.
 	MaxQueryLength int
+
+	// MaxResponseSize is the maximum accepted response size in bytes. When a
+	// response exceeds it, the read is aborted with a ProtocolError and the
+	// connection is closed (its stream position is no longer known). 0 means
+	// unlimited, which is the default for backward compatibility. A bounded
+	// value (for example 64<<20) is recommended to guard against a runaway or
+	// malformed response exhausting memory.
+	MaxResponseSize int
+
+	// AutoReconnect transparently re-establishes a dropped connection. When
+	// enabled, SendCommandContext reconnects once and resends the command if
+	// the socket is found dead *before* the request is written. A disconnect
+	// that occurs *after* the request was sent is surfaced as a ConnectionError
+	// without resending, since the command may already have been applied
+	// server-side. Default is false (legacy behavior). A Pool always enables it
+	// on the connections it owns so a transient drop is absorbed on the slot.
+	AutoReconnect bool
+
+	// DisableTCPKeepAlive turns off the client's SO_KEEPALIVE idle override on
+	// TCP connections. The zero value keeps keep-alive enabled with the
+	// TCPKeepAliveIdle period, so a silently dropped peer is detected without
+	// waiting for the next command's read timeout. Set it to true to leave the
+	// dialer's built-in keep-alive default in place instead. Ignored for
+	// Unix-socket connections. Defaulting keep-alive on this way keeps the
+	// behavior identical whether a client is built with NewClient or with
+	// NewClientWithConfig/NewPool.
+	DisableTCPKeepAlive bool
+
+	// TCPKeepAliveIdle is the idle period before keep-alive probing begins.
+	// Applies unless DisableTCPKeepAlive is set. 0 selects the default (60s).
+	TCPKeepAliveIdle time.Duration
 }
 
 // DefaultConfig returns the default configuration.
 func DefaultConfig() ClientConfig {
 	return ClientConfig{
-		Host:           "127.0.0.1",
-		Port:           11016,
-		TimeoutMs:      5000,
-		RecvBufferSize: 65536,
-		MaxQueryLength: 128,
+		Host:             "127.0.0.1",
+		Port:             11016,
+		TimeoutMs:        5000,
+		RecvBufferSize:   65536,
+		MaxQueryLength:   128,
+		TCPKeepAliveIdle: 60 * time.Second,
 	}
 }
 
@@ -95,10 +133,11 @@ type HighlightOptions struct {
 }
 
 // SearchRawOptions holds options for a raw search request that sends a
-// pre-built boolean expression as a single token. Introduced in MygramDB
-// v1.7. Unlike SearchOptions, a raw search exposes only pagination and
-// highlight controls — AND/NOT/FILTER refinements belong inside the
-// expression itself.
+// pre-built boolean expression. Introduced in MygramDB v1.7; since v1.8 the
+// expression is sent verbatim (unquoted) so the server's AST parser
+// interprets AND/OR/NOT and grouping (see Client.SearchRaw). Unlike
+// SearchOptions, a raw search exposes only pagination and highlight
+// controls — AND/NOT/FILTER refinements belong inside the expression itself.
 type SearchRawOptions struct {
 	// Limit is the maximum number of results to return. 0 means the server
 	// default.

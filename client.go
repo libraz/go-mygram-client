@@ -30,14 +30,30 @@ import (
 )
 
 // Client is a MygramDB client.
+//
+// A Client wraps a single connection and serializes every command with an
+// internal mutex, so it is safe for concurrent use but processes at most one
+// request at a time. For concurrent workloads use a Pool, which lends out many
+// Clients and adds reconnection and retry.
 type Client struct {
 	config ClientConfig
 	conn   net.Conn
 	mu     sync.Mutex
+
+	// scratch is a reusable receive buffer, allocated once per connection to
+	// avoid a per-command allocation on the hot read path. Guarded by mu.
+	scratch []byte
 }
 
-// NewClient creates a new client for the given address.
-// addr should be in "host:port" format or a Unix socket path.
+// NewClient creates a new client for the given address. addr should be in
+// "host:port" form; an address that does not parse as host:port is treated as a
+// Unix socket path (so a bare "localhost" without a port becomes a socket path,
+// not a TCP host).
+//
+// The returned Client owns a single connection and must be connected with
+// Connect (or ConnectContext) before issuing commands. Most applications should
+// use NewPool instead, which manages many connections with reconnection and
+// retry; use Client directly only to own and control a single connection.
 func NewClient(addr string) *Client {
 	config := DefaultConfig()
 
@@ -73,6 +89,9 @@ func NewClientWithConfig(config ClientConfig) *Client {
 	if config.MaxQueryLength == 0 {
 		config.MaxQueryLength = defaults.MaxQueryLength
 	}
+	if config.TCPKeepAliveIdle == 0 {
+		config.TCPKeepAliveIdle = defaults.TCPKeepAliveIdle
+	}
 	return &Client{config: config}
 }
 
@@ -89,28 +108,64 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 	if c.conn != nil {
 		return nil
 	}
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
+	c.conn = conn
+	return nil
+}
 
+// dial opens a new connection to the configured endpoint and applies TCP
+// keep-alive. It performs no locking and does not touch c.conn, so it is used
+// both by ConnectContext (under the lock) and by the auto-reconnect path.
+func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	timeout := time.Duration(c.config.TimeoutMs) * time.Millisecond
 	var d net.Dialer
 	d.Timeout = timeout
+	if c.config.SocketPath == "" && !c.config.DisableTCPKeepAlive {
+		// Enable SO_KEEPALIVE with the configured idle period. Ignored for Unix
+		// sockets; left at the dialer default when DisableTCPKeepAlive is set.
+		idle := c.config.TCPKeepAliveIdle
+		if idle <= 0 {
+			idle = 60 * time.Second
+		}
+		d.KeepAlive = idle
+	}
 
 	var conn net.Conn
 	var err error
-
 	if c.config.SocketPath != "" {
 		conn, err = d.DialContext(ctx, "unix", c.config.SocketPath)
 	} else {
 		addr := net.JoinHostPort(c.config.Host, strconv.Itoa(c.config.Port))
 		conn, err = d.DialContext(ctx, "tcp", addr)
 	}
-
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return &TimeoutError{Message: "connection timeout"}
+			te := &TimeoutError{Message: "connection timeout"}
+			if ctx.Err() == context.DeadlineExceeded {
+				te.Err = context.DeadlineExceeded
+			}
+			return nil, te
 		}
-		return &ConnectionError{Message: "failed to connect", Err: err}
+		// Nothing was sent, so a retry on a fresh dial is safe for any command.
+		return nil, &ConnectionError{Message: "failed to connect", Err: err, beforeSend: true}
 	}
+	return conn, nil
+}
 
+// reconnectLocked tears down any half-open socket and dials a fresh one. The
+// caller must hold c.mu. On failure c.conn is left nil.
+func (c *Client) reconnectLocked(ctx context.Context) error {
+	if c.conn != nil {
+		_ = c.conn.Close()
+		c.conn = nil
+	}
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return err
+	}
 	c.conn = conn
 	return nil
 }
@@ -141,37 +196,100 @@ func (c *Client) SendCommand(command string) (string, error) {
 }
 
 // SendCommandContext sends a raw command to the server with the given context.
+//
+// The context bounds how long the call waits: its deadline, if any, caps the
+// I/O timeout, and a context that is already canceled or past its deadline
+// fails fast before anything is sent. Once the request is in flight,
+// cancellation of a deadline-less context does not interrupt it; the command
+// still completes or hits TimeoutMs.
 func (c *Client) SendCommandContext(ctx context.Context, command string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.conn == nil {
-		return "", &ConnectionError{Message: "not connected to server"}
-	}
-
 	timeout := time.Duration(c.config.TimeoutMs) * time.Millisecond
 
-	// Use context deadline if it is shorter
+	// Use context deadline if it is shorter, and remember that it was the
+	// binding deadline so a resulting timeout can be attributed to the context.
+	ctxDeadlineBinding := false
 	if deadline, ok := ctx.Deadline(); ok {
 		if d := time.Until(deadline); d < timeout {
 			timeout = d
+			ctxDeadlineBinding = true
 		}
 	}
 
-	// Write
-	if err := c.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
-		return "", &ConnectionError{Message: "failed to set write deadline", Err: err}
-	}
+	// A failure before or during the write means the server never observed the
+	// command, so with AutoReconnect it is safe to reconnect once and resend.
+	// A failure during the read means the command was already delivered, so it
+	// is surfaced without resending.
+	reconnected := false
+	for {
+		if c.conn == nil {
+			if c.config.AutoReconnect && !reconnected {
+				reconnected = true
+				if err := c.reconnectLocked(ctx); err != nil {
+					return "", err
+				}
+			} else {
+				return "", &ConnectionError{Message: "not connected to server", beforeSend: true}
+			}
+		}
 
-	_, err := c.conn.Write([]byte(command + "\r\n"))
-	if err != nil {
-		c.conn = nil
-		return "", &ConnectionError{Message: "failed to send command", Err: err}
-	}
+		// Write
+		if err := c.conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+			// The command has not been written, so the server never acted on it,
+			// and the connection is no longer usable; close it and allow a retry.
+			_ = c.conn.Close()
+			c.conn = nil
+			if c.config.AutoReconnect && !reconnected {
+				reconnected = true
+				if rerr := c.reconnectLocked(ctx); rerr != nil {
+					return "", rerr
+				}
+				continue
+			}
+			return "", &ConnectionError{Message: "failed to set write deadline", Err: err, beforeSend: true}
+		}
 
+		if _, err := c.conn.Write([]byte(command + "\r\n")); err != nil {
+			_ = c.conn.Close()
+			c.conn = nil
+			// The command was not (fully) written, so the server never acted on
+			// it; mark it as safe to retry on a fresh connection.
+			if c.config.AutoReconnect && !reconnected {
+				reconnected = true
+				if rerr := c.reconnectLocked(ctx); rerr != nil {
+					return "", rerr
+				}
+				continue
+			}
+			return "", &ConnectionError{Message: "failed to send command", Err: err, beforeSend: true}
+		}
+
+		return c.finishCommand(ctx, timeout, ctxDeadlineBinding)
+	}
+}
+
+// finishCommand reads and normalizes the response after the command has been
+// written. A read-phase failure is never resent: the command was delivered, so
+// its outcome is unknown.
+func (c *Client) finishCommand(ctx context.Context, timeout time.Duration, ctxDeadlineBinding bool) (string, error) {
 	// Read
 	response, err := c.readResponse(timeout)
 	if err != nil {
+		// If the read timed out because the caller's context deadline was the
+		// binding one (the effective deadline is min(ctx, TimeoutMs)), attribute
+		// the cause so errors.Is(err, context.DeadlineExceeded) matches. Decide
+		// from which deadline was shorter rather than polling ctx.Err(), whose
+		// timer may not have fired yet at the instant the read deadline elapses.
+		if te, ok := err.(*TimeoutError); ok && te.Err == nil &&
+			(ctxDeadlineBinding || ctx.Err() == context.DeadlineExceeded) {
+			te.Err = context.DeadlineExceeded
+		}
 		return "", err
 	}
 
@@ -189,31 +307,58 @@ func (c *Client) SendCommandContext(ctx context.Context, command string) (string
 
 // readResponse reads a complete response from the server.
 func (c *Client) readResponse(timeout time.Duration) (string, error) {
-	buf := make([]byte, c.config.RecvBufferSize)
+	if c.scratch == nil {
+		c.scratch = make([]byte, c.config.RecvBufferSize)
+	}
 	var sb strings.Builder
 	deadline := time.Now().Add(timeout)
 
 	for {
 		if err := c.conn.SetReadDeadline(deadline); err != nil {
+			// The command was already written, so its outcome is unknown; the
+			// connection cannot be reused. Close it (beforeSend stays false).
+			_ = c.conn.Close()
+			c.conn = nil
 			return "", &ConnectionError{Message: "failed to set read deadline", Err: err}
 		}
 
-		n, err := c.conn.Read(buf)
+		n, err := c.conn.Read(c.scratch)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				return "", &TimeoutError{Message: "command timeout"}
 			}
+			_ = c.conn.Close()
 			c.conn = nil
 			return "", &ConnectionError{Message: "failed to read response", Err: err}
 		}
 
-		sb.Write(buf[:n])
-		data := sb.String()
+		sb.Write(c.scratch[:n])
 
-		if isResponseComplete(data) {
+		if c.config.MaxResponseSize > 0 && sb.Len() > c.config.MaxResponseSize {
+			// The stream position is now unknown, so the connection cannot be
+			// reused; close it and report a protocol violation.
+			_ = c.conn.Close()
+			c.conn = nil
+			return "", &ProtocolError{Message: "response exceeds MaxResponseSize"}
+		}
+
+		// strings.Builder.String() does not copy, so the only cost per read is
+		// the completeness scan. responseMayBeComplete is an O(1) necessary
+		// condition that lets us skip that scan until a terminator could
+		// plausibly be present, avoiding an O(n^2) blowup on large responses.
+		data := sb.String()
+		if responseMayBeComplete(data) && isResponseComplete(data) {
 			return data, nil
 		}
 	}
+}
+
+// responseMayBeComplete is a cheap necessary condition for isResponseComplete:
+// every complete response recognized by isResponseComplete ends with a newline
+// or with a bare "END" marker. When this returns false the full check is
+// guaranteed to return false, so it is safe to skip.
+func responseMayBeComplete(data string) bool {
+	return strings.HasSuffix(data, "\n") || strings.HasSuffix(data, "END")
 }
 
 // endTerminatedPrefix describes a multi-line response prefix that is
@@ -422,12 +567,14 @@ func (c *Client) SearchWithHighlightsContext(ctx context.Context, table, query s
 	return c.SearchContext(ctx, table, query, opts)
 }
 
-// SearchRaw searches using a pre-built boolean expression (MygramDB >= v1.7).
+// SearchRaw searches using a pre-built boolean expression (MygramDB >= v1.8).
 //
-// The expression is sent as one quoted token so the server's AST parser can
-// interpret AND / OR / NOT / parentheses. Pair this with ConvertSearchExpression
-// to preserve OR / grouping semantics that Search's AND/NOT decomposition
-// cannot express.
+// The expression is sent verbatim (unquoted) so the server tokenizes it and its
+// AST parser can interpret AND / OR / NOT / parentheses, including OR groups
+// nested under AND such as "alpha AND (beta OR gamma)". A quoted expression
+// would be treated by a v1.8 server as a single literal phrase, so quoting is
+// intentionally not applied. Pair this with ConvertSearchExpression to preserve
+// OR / grouping semantics that Search's AND/NOT decomposition cannot express.
 func (c *Client) SearchRaw(table, rawQuery string, opts SearchRawOptions) (*SearchResponse, error) {
 	return c.SearchRawContext(context.Background(), table, rawQuery, opts)
 }
@@ -447,7 +594,11 @@ func (c *Client) SearchRawContext(ctx context.Context, table, rawQuery string, o
 		return nil, err
 	}
 
-	parts := []string{"SEARCH", table, escapeQueryString(rawQuery)}
+	// The boolean expression is sent verbatim, not as a quoted token: a v1.8
+	// server treats a quoted phrase embedding AND/OR/NOT as a literal phrase,
+	// so quoting would defeat boolean parsing. ensureSafeValue above has already
+	// rejected control characters, so the expression cannot break the framing.
+	parts := []string{"SEARCH", table, rawQuery}
 	appendHighlightClause(&parts, opts.Highlight)
 	appendLimitOffset(&parts, opts.Limit, opts.Offset)
 
