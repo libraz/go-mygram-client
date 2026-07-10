@@ -10,9 +10,10 @@
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-Compatible with MygramDB v1.7 (database-qualified tables, raw boolean search,
-runtime variables, on-demand sync) and v1.6 (BM25 scoring, HIGHLIGHT, FUZZY,
-FACET).
+Compatible with MygramDB v1.8 (unquoted raw boolean transport with OR groups
+nested under AND, date-only filter values), v1.7 (database-qualified tables,
+raw boolean search, runtime variables, on-demand sync), and v1.6 (BM25 scoring,
+HIGHLIGHT, FUZZY, FACET).
 
 ## Overview
 
@@ -33,6 +34,8 @@ MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This 
 - **Full Protocol Support** — All MygramDB commands (SEARCH, COUNT, GET, INFO, etc.)
 - **Input Validation** — Built-in protection against control character injection
 - **Thread Safe** — Safe for concurrent use
+- **Connection Pooling** — Bounded `Pool` with reconnection and retry for high-throughput workloads
+- **Resilience** — Pool circuit breaker, observability events, TCP keep-alive, and client-level auto-reconnect
 
 ## Installation
 
@@ -87,141 +90,40 @@ func main() {
 }
 ```
 
-## Search Expressions
+## Connection Pooling
 
-Parse web-style search queries into structured search parameters:
+A single `Client` wraps one connection and serializes commands, so it handles
+one request at a time. For concurrent workloads use a `Pool`, which lends out
+many connections up to a fixed cap and adds transparent reconnection and retry.
+It exposes the same command methods as `Client`, so it is a drop-in replacement.
 
 ```go
-// Space = AND, - = NOT, "" = phrase, OR = OR, () = grouping
-expr, err := mygram.SimplifySearchExpression("hello world -spam")
-// expr = &SimplifiedExpression{MainTerm: "hello", AndTerms: ["world"], NotTerms: ["spam"]}
-
-resp, err := client.Search("articles", expr.MainTerm, mygram.SearchOptions{
-	AndTerms:   expr.AndTerms,
-	NotTerms:   expr.NotTerms,
-	Limit:      100,
-	Offset:     50,
-	Filters:    map[string]string{"status": "published", "lang": "en"},
-	SortColumn: "created_at",
-	SortDesc:   true,
+pool := mygram.NewPool(mygram.PoolConfig{
+	ClientConfig:    mygram.ClientConfig{Host: "localhost", Port: 11016},
+	MaxOpenConns:    16,               // hard cap on total connections
+	MaxIdleConns:    8,                // connections kept for reuse
+	ConnMaxLifetime: 30 * time.Minute, // recycle old connections
 })
+defer pool.Close()
+
+// Safe to call from many goroutines; each call borrows a connection.
+resp, err := pool.Search("articles", "hello", mygram.SearchOptions{Limit: 100})
 ```
 
-## MygramDB v1.6 Features
+When every connection is busy, a call blocks until one is returned or its
+`context` is canceled — a natural backpressure signal. See
+[Connection Pooling](docs/en/advanced-usage.md#connection-pooling) for sizing,
+retry semantics, and monitoring.
 
-### BM25 Relevance Scoring
+## Documentation
 
-Sort by relevance using the special `_score` sort column (requires
-`verify_text: ascii|all` on the server):
+- [Getting Started](docs/en/getting-started.md) — install, configuration, and error handling
+- [Search Expressions](docs/en/search-expression.md) — parse web-style search input
+- [API Reference](docs/en/api-reference.md) — every method, option, and type
+- [Advanced Usage](docs/en/advanced-usage.md) — connection pooling with the v1.8 resilience features (circuit breaker, observability events, TCP keep-alive, auto-reconnect), and the MygramDB v1.6/v1.7 features (BM25 `_score`, fuzzy, highlighting, facets, multi-database, raw boolean search, runtime variables, on-demand sync)
 
-```go
-resp, _ := client.Search("articles", "machine learning", mygram.SearchOptions{
-    SortColumn: "_score",
-    SortDesc:   true,
-    Limit:      10,
-})
-```
-
-### Fuzzy Search (Levenshtein)
-
-```go
-// Match within 1 edit (default) or 2 edits.
-resp, _ := client.Search("articles", "machne", mygram.SearchOptions{
-    Fuzzy: 1,
-    Limit: 10,
-})
-```
-
-### Highlighting
-
-```go
-resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
-    Highlight: &mygram.HighlightOptions{
-        OpenTag:      "<strong>",
-        CloseTag:     "</strong>",
-        SnippetLen:   200,
-        MaxFragments: 3,
-    },
-    SortColumn: "_score",
-    SortDesc:   true,
-    Limit:      10,
-})
-
-for _, r := range resp.Results {
-    fmt.Println(r.PrimaryKey, r.Snippet)
-}
-```
-
-A zero-value `&HighlightOptions{}` enables highlighting with server defaults
-(`<em>`/`</em>`, 100 code points, up to 3 fragments).
-
-### Facets
-
-Aggregate distinct filter column values with document counts. Optionally scope
-the aggregation to a search result set:
-
-```go
-// All distinct statuses:
-resp, _ := client.Facet("articles", "status", mygram.FacetOptions{})
-
-// Top categories among documents matching "machine learning":
-resp, _ := client.Facet("articles", "category", mygram.FacetOptions{
-    Query:   "machine learning",
-    Filters: map[string]string{"status": "1"},
-    Limit:   10,
-})
-
-for _, v := range resp.Results {
-    fmt.Printf("%s: %d\n", v.Value, v.Count)
-}
-```
-
-## MygramDB v1.7 Features
-
-### Database-qualified table identity
-
-A single MygramDB instance can index same-named tables from different databases.
-Reference a table as `database.table` (e.g. `app_db.articles`); on a
-single-database server a bare name keeps working unchanged.
-
-```go
-// Build / parse identities explicitly when needed:
-id, _ := mygram.QualifyTableIdentity("articles", "app_db") // "app_db.articles"
-db, table, _ := mygram.ParseTableIdentity("app_db.articles") // "app_db", "articles"
-
-// Any table argument accepts a qualified identity:
-resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
-```
-
-### Raw boolean search
-
-`Search` decomposes into AND/NOT clauses, which cannot express `OR` or grouping.
-`SearchRaw` sends a pre-built boolean expression as a single token so the server
-parses `AND` / `OR` / `NOT` / parentheses. Pair it with `ConvertSearchExpression`:
-
-```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
-resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
-
-// Snippet-returning variants:
-resp, _ = client.SearchWithHighlights("articles", "golang", mygram.SearchOptions{})
-resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
-```
-
-### Runtime variables (SET / SHOW VARIABLES)
-
-```go
-_ = client.SetVariable("logging.level", "debug")
-out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
-```
-
-### On-demand sync
-
-```go
-_, _ = client.Sync("articles")     // start a full reload of one table
-status, _ := client.SyncStatus()   // raw SYNC_STATUS report
-_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
-```
+Japanese docs live under [`docs/ja/`](docs/ja/). Package-level API docs are also
+on [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client).
 
 ## Development
 
