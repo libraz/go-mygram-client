@@ -1,4 +1,4 @@
-.PHONY: all test test-race test-e2e test-e2e-docker lint fmt vet check coverage clean
+.PHONY: all test test-race test-e2e test-e2e-docker lint fmt format vet check coverage clean
 
 all: check test
 
@@ -24,9 +24,15 @@ test-e2e-docker:
 lint:
 	golangci-lint run ./...
 
+# Resolve goimports from PATH, then GOPATH/bin, falling back to `go run`
+# so `make fmt` works regardless of the developer's PATH setup.
+GOIMPORTS ?= $(shell command -v goimports 2>/dev/null || ( [ -x "$$(go env GOPATH)/bin/goimports" ] && echo "$$(go env GOPATH)/bin/goimports" ) || echo "go run golang.org/x/tools/cmd/goimports@latest")
+
 fmt:
 	gofmt -w .
-	goimports -w -local github.com/libraz/go-mygram-client .
+	$(GOIMPORTS) -w -local github.com/libraz/go-mygram-client .
+
+format: fmt
 
 vet:
 	go vet ./...
