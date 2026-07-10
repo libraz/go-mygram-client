@@ -36,6 +36,30 @@ func poolMockServer(t *testing.T, handle func(idx int, conn net.Conn)) (addr str
 	return ln.Addr().String(), func() int { return int(atomic.LoadInt64(&n)) }, func() { _ = ln.Close() }
 }
 
+// waitAccepts blocks until the mock server's accept count reaches want, failing
+// the test if it overshoots or does not arrive within the deadline. The count
+// is incremented in the server's accept loop, which runs after the client's
+// dial has returned, so reading it immediately would race; polling closes that
+// window without masking a genuine extra connection (which pushes the count
+// past want and fails fast).
+func waitAccepts(t *testing.T, accepts func() int, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := accepts()
+		if got == want {
+			return
+		}
+		if got > want {
+			t.Fatalf("accepted %d connections, want %d", got, want)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("accepted %d connections, want %d (timed out)", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // echoSearchServer serves any number of SEARCH-like requests on one connection,
 // replying with a fixed single-result response, until the peer closes.
 func echoSearchServer(idx int, conn net.Conn) {
@@ -90,9 +114,7 @@ func TestPoolReusesConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (sequential calls should reuse)", got)
-	}
+	waitAccepts(t, accepts, 1) // sequential calls should reuse
 	st := p.Stats()
 	if st.Open != 1 || st.Idle != 1 || st.InUse != 0 {
 		t.Errorf("stats = %+v, want Open=1 Idle=1 InUse=0", st)
@@ -223,9 +245,7 @@ func TestPoolRetriesIdempotentAfterDrop(t *testing.T) {
 	if resp.TotalCount != 1 {
 		t.Errorf("TotalCount = %d, want 1", resp.TotalCount)
 	}
-	if got := accepts(); got != 2 {
-		t.Errorf("accepted %d connections, want 2 (one dropped, one retried)", got)
-	}
+	waitAccepts(t, accepts, 2) // one dropped, one retried
 	if st := p.Stats(); st.Retries != 1 {
 		t.Errorf("Retries = %d, want 1", st.Retries)
 	}
@@ -241,9 +261,7 @@ func TestPoolDoesNotRetryMutatingAfterDrop(t *testing.T) {
 	if _, ok := err.(*ConnectionError); !ok {
 		t.Fatalf("err = %T (%v), want *ConnectionError", err, err)
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (no retry for mutating command)", got)
-	}
+	waitAccepts(t, accepts, 1) // no retry for mutating command
 }
 
 func TestPoolDiscardsExpiredOnBorrow(t *testing.T) {
@@ -260,9 +278,7 @@ func TestPoolDiscardsExpiredOnBorrow(t *testing.T) {
 	if _, err := p.Search("threads", "k", SearchOptions{Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if got := accepts(); got != 2 {
-		t.Errorf("accepted %d connections, want 2 (expired conn discarded, new one dialed)", got)
-	}
+	waitAccepts(t, accepts, 2) // expired conn discarded, new one dialed
 	if st := p.Stats(); st.Discarded < 1 {
 		t.Errorf("Discarded = %d, want >= 1", st.Discarded)
 	}
@@ -377,9 +393,7 @@ func TestPoolDisabledRetryDoesNotRetry(t *testing.T) {
 	if _, ok := err.(*ConnectionError); !ok {
 		t.Fatalf("err = %T (%v), want *ConnectionError (retries disabled)", err, err)
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (no retry when disabled)", got)
-	}
+	waitAccepts(t, accepts, 1) // no retry when disabled
 	if st := p.Stats(); st.Retries != 0 {
 		t.Errorf("Retries = %d, want 0", st.Retries)
 	}
@@ -410,9 +424,7 @@ func TestPoolReusesConnAfterPreSendContextCancel(t *testing.T) {
 	if _, err := p.Search("threads", "k", SearchOptions{Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (connection should have been reused)", got)
-	}
+	waitAccepts(t, accepts, 1) // connection should have been reused
 }
 
 func TestPoolReleaseAfterCloseDiscards(t *testing.T) {
@@ -486,9 +498,7 @@ func TestPoolDoesNotDialAfterClose(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("waiter did not return after Close")
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (must not dial after Close)", got)
-	}
+	waitAccepts(t, accepts, 1) // must not dial after Close
 }
 
 func TestPoolRetriesDialFailure(t *testing.T) {

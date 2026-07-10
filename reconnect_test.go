@@ -36,9 +36,7 @@ func TestClientAutoReconnectResendsWhenDeadBeforeSend(t *testing.T) {
 	if !strings.Contains(resp, "OK RESULTS") {
 		t.Errorf("response = %q, want an OK RESULTS reply", resp)
 	}
-	if got := accepts(); got != 2 {
-		t.Errorf("accepted %d connections, want 2 (initial + reconnect)", got)
-	}
+	waitAccepts(t, accepts, 2) // initial + reconnect
 }
 
 func TestClientWithoutAutoReconnectFailsWhenDead(t *testing.T) {
@@ -55,9 +53,7 @@ func TestClientWithoutAutoReconnectFailsWhenDead(t *testing.T) {
 	if _, ok := err.(*ConnectionError); !ok {
 		t.Fatalf("err = %T (%v), want *ConnectionError", err, err)
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (no reconnect without AutoReconnect)", got)
-	}
+	waitAccepts(t, accepts, 1) // no reconnect without AutoReconnect
 }
 
 // holdServer reads one request and then holds the connection open without
@@ -86,7 +82,5 @@ func TestClientAutoReconnectDoesNotResendAfterSend(t *testing.T) {
 	if _, ok := err.(*TimeoutError); !ok {
 		t.Fatalf("err = %T (%v), want *TimeoutError", err, err)
 	}
-	if got := accepts(); got != 1 {
-		t.Errorf("accepted %d connections, want 1 (a post-send failure must not resend)", got)
-	}
+	waitAccepts(t, accepts, 1) // a post-send failure must not resend
 }
