@@ -39,21 +39,28 @@ func connReusable(err error) bool {
 }
 
 // shouldRetry decides whether a failed command may be retried. It never retries
-// server errors, validation errors, or timeouts. A connection error is retried
-// when the command never reached the server (safe for any command) or when the
-// command is idempotent, subject to the attempt budget.
+// server errors, validation errors, or post-send timeouts. A connection error
+// or a connect-phase (pre-send) timeout is retried when the command never
+// reached the server (safe for any command) or when the command is idempotent,
+// subject to the attempt budget.
 func shouldRetry(err error, idempotent bool, attempt, maxRetries int) bool {
 	if attempt >= maxRetries {
 		return false
 	}
-	ce, ok := err.(*ConnectionError)
-	if !ok {
+	switch e := err.(type) {
+	case *ConnectionError:
+		if e.beforeSend {
+			return true
+		}
+		return idempotent
+	case *TimeoutError:
+		// A connect-phase timeout wrote nothing, so a fresh dial is safe for any
+		// command; a post-send read timeout may have been acted upon and is not
+		// retried.
+		return e.beforeSend
+	default:
 		return false
 	}
-	if ce.beforeSend {
-		return true
-	}
-	return idempotent
 }
 
 // sleepBackoff waits for an exponential-with-full-jitter delay before the next

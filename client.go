@@ -143,7 +143,7 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 	}
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			te := &TimeoutError{Message: "connection timeout"}
+			te := &TimeoutError{Message: "connection timeout", beforeSend: true}
 			if ctx.Err() == context.DeadlineExceeded {
 				te.Err = context.DeadlineExceeded
 			}

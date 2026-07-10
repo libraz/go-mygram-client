@@ -46,6 +46,12 @@ type TimeoutError struct {
 	// when the caller's context deadline elapsed). It is nil for a timeout
 	// driven purely by the configured TimeoutMs.
 	Err error
+
+	// beforeSend reports whether the timeout occurred before the command was
+	// written to the socket (a connect-phase dial timeout). Such a failure sent
+	// nothing, so a fresh dial is safe to retry for any command; a post-send
+	// read timeout leaves this false because the server may have acted on it.
+	beforeSend bool
 }
 
 func (e *TimeoutError) Error() string {

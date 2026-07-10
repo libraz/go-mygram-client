@@ -53,7 +53,9 @@ func TestShouldRetry(t *testing.T) {
 		{"zero budget", connBeforeSend, true, 0, 0, false},
 		{"server error never retried", &ServerError{Message: "x"}, true, 0, 3, false},
 		{"validation error never retried", &ValidationError{Message: "x"}, true, 0, 3, false},
-		{"timeout never retried", &TimeoutError{Message: "x"}, true, 0, 3, false},
+		{"post-send timeout not retried", &TimeoutError{Message: "x"}, true, 0, 3, false},
+		{"connect-phase timeout idempotent retried", &TimeoutError{Message: "connection timeout", beforeSend: true}, true, 0, 3, true},
+		{"connect-phase timeout mutating retried", &TimeoutError{Message: "connection timeout", beforeSend: true}, false, 0, 3, true},
 		{"nil never retried", nil, true, 0, 3, false},
 	}
 	for _, tt := range tests {
