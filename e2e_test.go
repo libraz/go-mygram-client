@@ -688,10 +688,18 @@ func TestE2EReplicationToggle(t *testing.T) {
 func TestE2ESearchRaw(t *testing.T) {
 	c := newE2EClient(t)
 	table := firstTable(t, c)
-	// A boolean OR expression sent as a single token; tolerate servers that
-	// reject the clause so the test proves the client round-trips it.
-	if _, err := c.SearchRaw(table, "test OR example", SearchRawOptions{Limit: 5}); err != nil && !isProtocolError(err) {
-		t.Fatalf("SearchRaw: %v", err)
+	// Boolean expressions are sent verbatim (v1.8 unquoted transport). Tolerate
+	// servers that reject the clause so the test proves the client round-trips
+	// the expression whole. Include an OR group nested under AND — the shape
+	// v1.8 fixed — to exercise the parser end to end.
+	exprs := []string{
+		"test OR example",
+		"test AND (example OR sample)",
+	}
+	for _, expr := range exprs {
+		if _, err := c.SearchRaw(table, expr, SearchRawOptions{Limit: 5}); err != nil && !isProtocolError(err) {
+			t.Fatalf("SearchRaw %q: %v", expr, err)
+		}
 	}
 }
 
@@ -813,6 +821,21 @@ func TestE2ESeeded(t *testing.T) {
 			got[r.PrimaryKey] = true
 		}
 		assertPKSet(t, got, "2", "3")
+	})
+
+	t.Run("searchRaw OR group nested under AND", func(t *testing.T) {
+		// v1.8 unquoted transport + nested-OR parsing. id 2 ("ruby on rails
+		// programming guide") matches "programming" AND "ruby"; id 3 has
+		// "python" but not "programming", so the set is exactly {2}.
+		resp, err := c.SearchRaw(table, "programming AND (ruby OR python)", SearchRawOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchRaw: %v", err)
+		}
+		got := make(map[string]bool, len(resp.Results))
+		for _, r := range resp.Results {
+			got[r.PrimaryKey] = true
+		}
+		assertPKSet(t, got, "2")
 	})
 
 	t.Run("japanese ngram match", func(t *testing.T) {

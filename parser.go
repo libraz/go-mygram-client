@@ -121,10 +121,16 @@ func parseFacetResponse(response string) (*FacetResponse, error) {
 
 	results := make([]FacetValue, 0, expected)
 	for _, line := range lines[1:] {
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
 			continue
 		}
 		tab := strings.IndexByte(line, '\t')
+		// A line starting with '#' is a comment (e.g. "# DEBUG") only when it
+		// has no tab. A facet value may legitimately start with '#', in which
+		// case the line still has the "<value>\t<count>" shape and is data.
+		if strings.HasPrefix(line, "#") && tab < 0 {
+			continue
+		}
 		if tab < 0 {
 			return nil, &ProtocolError{Message: "invalid FACET row: " + line}
 		}

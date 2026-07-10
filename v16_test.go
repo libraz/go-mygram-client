@@ -157,6 +157,32 @@ func TestParseFacetResponse(t *testing.T) {
 		}
 	})
 
+	t.Run("value starting with hash is kept", func(t *testing.T) {
+		// v1.8: a facet value may legitimately start with '#'. Such a row has a
+		// tab and must not be dropped as a comment, while a tab-less '#' line
+		// (e.g. a debug comment) is still skipped.
+		response := "OK FACET 2\n" +
+			"#hashtag\t9\n" +
+			"#golang\t4\n" +
+			"# query_time_ms: 0.5\n"
+		resp, err := parseFacetResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []FacetValue{
+			{Value: "#hashtag", Count: 9},
+			{Value: "#golang", Count: 4},
+		}
+		if len(resp.Results) != len(want) {
+			t.Fatalf("len(Results) = %d, want %d (%+v)", len(resp.Results), len(want), resp.Results)
+		}
+		for i, w := range want {
+			if resp.Results[i] != w {
+				t.Errorf("Results[%d] = %+v, want %+v", i, resp.Results[i], w)
+			}
+		}
+	})
+
 	t.Run("value with spaces", func(t *testing.T) {
 		// Facet values are whitespace-tolerant; only tab separates the count.
 		response := "OK FACET 1\nmachine learning\t5\n"

@@ -189,9 +189,36 @@ func TestSearchRawCommand(t *testing.T) {
 		t.Errorf("TotalCount = %d, want 2", resp.TotalCount)
 	}
 	cmd := srv.lastCommand()
-	want := `SEARCH articles "python OR (ruby AND rails)" LIMIT 50`
+	// v1.8: the boolean expression is sent verbatim (unquoted) so the server's
+	// AST parser interprets AND/OR/grouping. A quoted expression would be taken
+	// as a literal phrase.
+	want := `SEARCH articles python OR (ruby AND rails) LIMIT 50`
 	if cmd != want {
 		t.Errorf("command = %q, want %q", cmd, want)
+	}
+}
+
+func TestSearchRawNestedBooleanUnquoted(t *testing.T) {
+	c, srv := connectRecording(t, "OK RESULTS 1 2\r\n")
+	// OR nested under AND is the case v1.8 fixed; it must reach the server
+	// whole and unquoted.
+	if _, err := c.SearchRaw("articles", "programming AND (ruby OR python)", SearchRawOptions{Limit: 10}); err != nil {
+		t.Fatalf("SearchRaw: %v", err)
+	}
+	want := `SEARCH articles programming AND (ruby OR python) LIMIT 10`
+	if cmd := srv.lastCommand(); cmd != want {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+}
+
+func TestSearchRawRejectsControlChars(t *testing.T) {
+	// Because the expression is now unquoted, a newline could break framing;
+	// validation must reject it before it reaches the wire.
+	c := NewClient("127.0.0.1:1")
+	if _, err := c.SearchRaw("articles", "a OR b\nDROP", SearchRawOptions{}); err == nil {
+		t.Fatal("expected validation error for control character in rawQuery")
+	} else if _, ok := err.(*ValidationError); !ok {
+		t.Errorf("expected *ValidationError, got %T", err)
 	}
 }
 

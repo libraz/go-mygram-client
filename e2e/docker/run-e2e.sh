@@ -27,7 +27,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.7.0})"
+echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.8.0})"
 MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" "${COMPOSE[@]}" up -d --wait
 
 # `--wait` already blocks on the healthcheck (/health/ready), which only turns
