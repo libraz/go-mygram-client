@@ -6,6 +6,121 @@ import (
 	"testing"
 )
 
+// Response reading (client.go): the completeness gate that decides when a
+// frame has fully arrived, and the MaxResponseSize bound.
+
+func TestIsResponseComplete(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     string
+		complete bool
+	}{
+		{"single line CRLF", "OK RESULTS 0\r\n", true},
+		{"single line LF", "OK RESULTS 0\n", true},
+		{"double LF", "OK INFO\nversion: 1.0\n\n", true},
+		{"double CRLF", "OK INFO\r\nversion: 1.0\r\n\r\n", true},
+		{"incomplete", "OK RESULTS ", false},
+		{"REPLICATION with END", "OK REPLICATION\nstatus: running\nEND\n", true},
+		{"REPLICATION with END and newline", "OK REPLICATION\nstatus: running\nEND\n\n", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isResponseComplete(tt.data)
+			if result != tt.complete {
+				t.Errorf("isResponseComplete(%q) = %v, want %v", tt.data, result, tt.complete)
+			}
+		})
+	}
+}
+
+func TestIsResponseCompleteFirstLinePrefixOnly(t *testing.T) {
+	// First-line prefix matching: a response whose first line is OK RESULTS
+	// must not be treated as DUMP_STATUS just because the substring appears
+	// later in the payload.
+	tests := []struct {
+		name string
+		data string
+		want bool
+	}{
+		{
+			"DUMP_INFO with filepath END-terminated complete",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\nEND\r\n",
+			true,
+		},
+		{
+			"DUMP_INFO incomplete without END or blank line",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\n",
+			false,
+		},
+		{
+			"DUMP_INFO with blank-line termination",
+			"OK DUMP_INFO /backup/dump.dmp\r\nversion: 2\r\n\r\n",
+			true,
+		},
+		{
+			"OK RESULTS with DUMP_STATUS-looking PK is single-line complete",
+			"OK RESULTS 1 OK_DUMP_STATUS_pk\r\n",
+			true,
+		},
+		{
+			"OK CACHE_STATS with END",
+			"OK CACHE_STATS\r\n\r\n# Cache\r\nenabled: true\r\nEND\r\n",
+			true,
+		},
+		{
+			"OK CACHE_STATS incomplete",
+			"OK CACHE_STATS\r\nenabled: true",
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isResponseComplete(tt.data); got != tt.want {
+				t.Errorf("isResponseComplete(%q) = %v, want %v", tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsResponseCompleteFacet(t *testing.T) {
+	cases := []struct {
+		name     string
+		data     string
+		complete bool
+	}{
+		{"empty facet terminated", "OK FACET 0\r\n\r\n", true},
+		{"facet with rows terminated", "OK FACET 1\r\nfoo\t1\r\n\r\n", true},
+		{"facet with rows not yet terminated", "OK FACET 1\r\nfoo\t1\r\n", false},
+		{"facet header only", "OK FACET 1\r\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isResponseComplete(tc.data)
+			if got != tc.complete {
+				t.Errorf("isResponseComplete(%q) = %v, want %v", tc.data, got, tc.complete)
+			}
+		})
+	}
+}
+
+func TestIsResponseCompleteSyncStatus(t *testing.T) {
+	// END-terminated with a single trailing CRLF (no blank line).
+	single := "OK SYNC_STATUS\r\narticles idle\r\nEND\r\n"
+	if !isResponseComplete(single) {
+		t.Error("single-CRLF SYNC_STATUS not recognized as complete")
+	}
+	// END-terminated with an extra blank line.
+	doubled := "OK SYNC_STATUS\r\narticles idle\r\nEND\r\n\r\n"
+	if !isResponseComplete(doubled) {
+		t.Error("blank-line-terminated SYNC_STATUS not recognized as complete")
+	}
+	// Incomplete: header only.
+	if isResponseComplete("OK SYNC_STATUS\r\n") {
+		t.Error("header-only SYNC_STATUS wrongly recognized as complete")
+	}
+}
+
 // TestResponseMayBeCompleteIsNecessary asserts the core invariant that lets
 // readResponse skip the completeness scan: whenever isResponseComplete reports
 // a complete response, responseMayBeComplete must also be true. If this held
@@ -99,7 +214,7 @@ func TestMaxResponseSizeExceeded(t *testing.T) {
 func TestMaxResponseSizeUnlimitedByDefault(t *testing.T) {
 	// A response larger than the historical buffer must still be accepted when
 	// MaxResponseSize is 0.
-	body := "OK FACET 1\n" + strings.Repeat("v\t1\n", 5000) + "\n"
+	body := "OK FACET 5000\n" + strings.Repeat("v\t1\n", 5000) + "\n"
 	addr, cleanup := mockServer(t, func(conn net.Conn) {
 		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 4096)

@@ -13,81 +13,49 @@ import (
 	"time"
 )
 
-// poolMockServer starts a listener whose accepted connections are handled by
-// handle. It returns the address, an accessor for the number of accepted
-// connections, and a cleanup function.
-func poolMockServer(t *testing.T, handle func(idx int, conn net.Conn)) (addr string, accepts func() int, cleanup func()) {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var n int64
-	go func() {
-		for {
-			conn, acceptErr := ln.Accept()
-			if acceptErr != nil {
-				return
-			}
-			idx := int(atomic.AddInt64(&n, 1))
-			go handle(idx, conn)
-		}
-	}()
-	return ln.Addr().String(), func() int { return int(atomic.LoadInt64(&n)) }, func() { _ = ln.Close() }
-}
+// Connection pooling (pool.go, pool_commands.go).
 
-// waitAccepts blocks until the mock server's accept count reaches want, failing
-// the test if it overshoots or does not arrive within the deadline. The count
-// is incremented in the server's accept loop, which runs after the client's
-// dial has returned, so reading it immediately would race; polling closes that
-// window without masking a genuine extra connection (which pushes the count
-// past want and fails fast).
-func waitAccepts(t *testing.T, accepts func() int, want int) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		got := accepts()
-		if got == want {
-			return
-		}
-		if got > want {
-			t.Fatalf("accepted %d connections, want %d", got, want)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("accepted %d connections, want %d (timed out)", got, want)
-		}
-		time.Sleep(time.Millisecond)
+func TestNewPoolDefaults(t *testing.T) {
+	p := NewPool(PoolConfig{})
+	if p.cfg.MaxOpenConns != defaultMaxOpenConns {
+		t.Errorf("MaxOpenConns = %d, want %d", p.cfg.MaxOpenConns, defaultMaxOpenConns)
+	}
+	if p.cfg.MaxIdleConns != defaultMaxOpenConns {
+		t.Errorf("MaxIdleConns = %d, want %d", p.cfg.MaxIdleConns, defaultMaxOpenConns)
+	}
+	if p.cfg.Retry.MaxRetries != defaultMaxRetries {
+		t.Errorf("MaxRetries = %d, want %d", p.cfg.Retry.MaxRetries, defaultMaxRetries)
+	}
+	if p.cfg.Retry.BaseBackoff != defaultBaseBackoff {
+		t.Errorf("BaseBackoff = %v, want %v", p.cfg.Retry.BaseBackoff, defaultBaseBackoff)
+	}
+	if cap(p.sem) != defaultMaxOpenConns {
+		t.Errorf("cap(sem) = %d, want %d", cap(p.sem), defaultMaxOpenConns)
 	}
 }
 
-// echoSearchServer serves any number of SEARCH-like requests on one connection,
-// replying with a fixed single-result response, until the peer closes.
-func echoSearchServer(idx int, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-	br := bufio.NewReader(conn)
-	for {
-		if _, err := br.ReadString('\n'); err != nil {
-			return
-		}
-		if _, err := conn.Write([]byte("OK RESULTS 1 42\r\n")); err != nil {
-			return
-		}
+func TestNewPoolClampsIdleToOpen(t *testing.T) {
+	p := NewPool(PoolConfig{MaxOpenConns: 3, MaxIdleConns: 10})
+	if p.cfg.MaxIdleConns != 3 {
+		t.Errorf("MaxIdleConns = %d, want clamped to 3", p.cfg.MaxIdleConns)
 	}
 }
 
-func poolFor(t *testing.T, addr string, cfg PoolConfig) *Pool {
-	t.Helper()
-	cfg.Host, cfg.Port = splitHostPort(t, addr)
-	cfg.MaxQueryLength = 0
-	p := NewPool(cfg)
-	t.Cleanup(func() { _ = p.Close() })
-	return p
+func TestNewPoolExplicitNoRetry(t *testing.T) {
+	// A caller that sets a backoff but wants zero retries must keep zero.
+	p := NewPool(PoolConfig{Retry: RetryPolicy{MaxRetries: 0, BaseBackoff: 10}})
+	if p.cfg.Retry.MaxRetries != 0 {
+		t.Errorf("MaxRetries = %d, want 0 (explicit)", p.cfg.Retry.MaxRetries)
+	}
 }
 
-func splitHostPort(t *testing.T, addr string) (string, int) {
-	t.Helper()
-	c := NewClient(addr)
-	return c.config.Host, c.config.Port
+func TestNewPoolNegativeMaxRetriesDisables(t *testing.T) {
+	// A negative MaxRetries is the intuitive opt-out and must stay at zero
+	// rather than being re-inflated to the default policy.
+	p := NewPool(PoolConfig{Retry: RetryPolicy{MaxRetries: -1}})
+	if p.cfg.Retry.MaxRetries != 0 {
+		t.Errorf("MaxRetries = %d, want 0 (negative disables retries)", p.cfg.Retry.MaxRetries)
+	}
 }
 
 func TestPoolBasicSearch(t *testing.T) {
@@ -214,23 +182,6 @@ func TestPoolClosed(t *testing.T) {
 	if st := p.Stats(); st.Open != 0 {
 		t.Errorf("after Close, Open = %d, want 0", st.Open)
 	}
-}
-
-// dropFirstThenServe closes the first accepted connection without responding
-// (simulating a dropped/stale connection) and serves later connections
-// normally.
-func dropFirstThenServe(idx int, conn net.Conn) {
-	br := bufio.NewReader(conn)
-	if _, err := br.ReadString('\n'); err != nil {
-		_ = conn.Close()
-		return
-	}
-	if idx == 1 {
-		_ = conn.Close() // drop after reading, before responding
-		return
-	}
-	_, _ = conn.Write([]byte("OK RESULTS 1 42\r\n"))
-	echoSearchServer(idx, conn)
 }
 
 func TestPoolRetriesIdempotentAfterDrop(t *testing.T) {
@@ -581,13 +532,36 @@ func TestPoolDialFailureExhaustsRetries(t *testing.T) {
 	}
 }
 
+func TestPoolAuthenticatesEveryConnection(t *testing.T) {
+	srv, addr := newAuthServer(t, "OK AUTHENTICATED\r\n", "OK RESULTS 0\r\n")
+
+	host, port := splitHostPort(t, addr)
+	cfg := PoolConfig{}
+	cfg.Host, cfg.Port = host, port
+	cfg.AdminToken = "s3cret"
+	cfg.MaxOpenConns = 1
+	p := NewPool(cfg)
+	defer func() { _ = p.Close() }()
+
+	if _, err := p.Search("articles", "golang", SearchOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	cmds := srv.recorded()
+	if len(cmds) == 0 || cmds[0] != "AUTH s3cret" {
+		t.Errorf("recorded %v, want AUTH first", cmds)
+	}
+}
+
 // TestPoolMatchesClientContextMethods verifies that every command-bearing
 // *Context method on Client has a counterpart on Pool with an identical
 // signature (receiver aside), so the two surfaces cannot drift apart.
 func TestPoolMatchesClientContextMethods(t *testing.T) {
-	// Lifecycle methods that intentionally do not appear on Pool.
+	// Lifecycle methods that intentionally do not appear on Pool. A Pool
+	// authenticates every connection it opens from ClientConfig.AdminToken, so
+	// authenticating one borrowed connection would be meaningless.
 	exclude := map[string]bool{
-		"ConnectContext": true,
+		"ConnectContext":      true,
+		"AuthenticateContext": true,
 	}
 
 	clientT := reflect.TypeOf((*Client)(nil))

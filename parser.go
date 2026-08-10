@@ -1,6 +1,7 @@
 package mygram
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -92,14 +93,19 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 
 // parseFacetResponse parses a FACET response.
 //
-// Format (MygramDB >= v1.6):
+// Format (MygramDB >= v1.9):
 //
-//	OK FACET <num_values>
+//	OK FACET <num_values> <total_values>
 //	<value1>\t<count1>
 //	<value2>\t<count2>
 //	...
 //	[# query_time_ms: <n>]
 //	[# total_docs_searched: <n>]
+//
+// <num_values> is the size of the returned page and <total_values> the number
+// of distinct values before OFFSET and LIMIT. A server that predates paginated
+// facets omits the second number, in which case the page size is reported as
+// the total.
 func parseFacetResponse(response string) (*FacetResponse, error) {
 	normalized := strings.ReplaceAll(response, "\r\n", "\n")
 	lines := strings.Split(normalized, "\n")
@@ -109,14 +115,23 @@ func parseFacetResponse(response string) (*FacetResponse, error) {
 		return nil, &ProtocolError{Message: "invalid FACET response: " + firstLine}
 	}
 
-	// First line is "OK FACET <num_values>"; count is the third token.
 	parts := strings.Fields(firstLine)
 	if len(parts) < 3 {
 		return nil, &ProtocolError{Message: "invalid FACET response: missing count"}
 	}
+	if len(parts) > 4 {
+		return nil, &ProtocolError{Message: "invalid FACET response header: " + firstLine}
+	}
 	expected, err := strconv.Atoi(parts[2])
-	if err != nil {
+	if err != nil || expected < 0 {
 		return nil, &ProtocolError{Message: "invalid FACET count: " + parts[2]}
+	}
+	total := int64(expected)
+	if len(parts) == 4 {
+		total, err = strconv.ParseInt(parts[3], 10, 64)
+		if err != nil || total < int64(expected) {
+			return nil, &ProtocolError{Message: "invalid FACET total count: " + parts[3]}
+		}
 	}
 
 	results := make([]FacetValue, 0, expected)
@@ -143,11 +158,24 @@ func parseFacetResponse(response string) (*FacetResponse, error) {
 		results = append(results, FacetValue{Value: value, Count: count})
 	}
 
-	return &FacetResponse{Results: results}, nil
+	// The header's page size is authoritative: a mismatch means rows were lost
+	// or a value carried an embedded newline, either of which would silently
+	// truncate the caller's page.
+	if len(results) != expected {
+		return nil, &ProtocolError{
+			Message: fmt.Sprintf("FACET row count mismatch: header says %d, got %d", expected, len(results)),
+		}
+	}
+
+	return &FacetResponse{Results: results, TotalCount: total}, nil
 }
 
 // parseCountResponse parses a COUNT response.
 // Format: OK COUNT <number>
+//
+// The header is parsed strictly: the count must be a non-negative decimal and
+// the only payload on the line, so a malformed or truncated frame is reported
+// instead of silently yielding a plausible number.
 func parseCountResponse(response string) (*CountResponse, error) {
 	lines := strings.Split(response, "\n")
 	firstLine := lines[0]
@@ -160,9 +188,12 @@ func parseCountResponse(response string) (*CountResponse, error) {
 	if len(parts) < 3 {
 		return nil, &ProtocolError{Message: "invalid COUNT response: missing count"}
 	}
+	if len(parts) > 3 {
+		return nil, &ProtocolError{Message: "invalid COUNT response header: " + firstLine}
+	}
 
 	count, err := strconv.Atoi(parts[2])
-	if err != nil {
+	if err != nil || count < 0 {
 		return nil, &ProtocolError{Message: "invalid count: " + parts[2]}
 	}
 
@@ -232,6 +263,10 @@ func parseInfoResponse(response string) (*ServerInfo, error) {
 		switch key {
 		case "version":
 			info.Version = value
+		case "data_initialized":
+			info.DataInitialized = value == "true"
+		case "readiness":
+			info.Readiness = value
 		case "uptime_seconds":
 			info.UptimeSeconds, _ = strconv.Atoi(value)
 		case "total_requests":
@@ -375,6 +410,8 @@ func parseCacheStatsResponse(response string) (*CacheStats, error) {
 		switch key {
 		case "enabled":
 			cs.Enabled = value == "true"
+		case "total_queries":
+			cs.TotalQueries, _ = strconv.Atoi(value)
 		case "cache_hits":
 			cs.Hits, _ = strconv.Atoi(value)
 		case "cache_misses":
@@ -385,8 +422,46 @@ func parseCacheStatsResponse(response string) (*CacheStats, error) {
 			cs.CurrentEntries, _ = strconv.Atoi(value)
 		case "current_memory_bytes":
 			cs.MemoryBytes, _ = strconv.Atoi(value)
+		case "invalidation_index_memory_bytes":
+			cs.InvalidationIndexMemoryBytes, _ = strconv.Atoi(value)
+		case "invalidation_queue_memory_bytes":
+			cs.InvalidationQueueMemoryBytes, _ = strconv.Atoi(value)
+		case "accounted_memory_bytes":
+			cs.AccountedMemoryBytes, _ = strconv.Atoi(value)
 		case "evictions":
 			cs.Evictions, _ = strconv.Atoi(value)
+		case "ttl_expirations":
+			cs.TTLExpirations, _ = strconv.Atoi(value)
+		case "rejection_count":
+			cs.RejectionCount, _ = strconv.Atoi(value)
+		case "rejection_oversize":
+			cs.RejectionOversize, _ = strconv.Atoi(value)
+		case "rejection_memory_budget":
+			cs.RejectionMemoryBudget, _ = strconv.Atoi(value)
+		case "rejection_duplicate":
+			cs.RejectionDuplicate, _ = strconv.Atoi(value)
+		case "stale_entry_removals":
+			cs.StaleEntryRemovals, _ = strconv.Atoi(value)
+		case "decompression_failures":
+			cs.DecompressionFailures, _ = strconv.Atoi(value)
+		case "stale_lru_entries":
+			cs.StaleLRUEntries, _ = strconv.Atoi(value)
+		case "invalidations_immediate":
+			cs.InvalidationsImmediate, _ = strconv.Atoi(value)
+		case "invalidations_deferred":
+			cs.InvalidationsDeferred, _ = strconv.Atoi(value)
+		case "invalidations_batches":
+			cs.InvalidationsBatches, _ = strconv.Atoi(value)
+		case "avg_cache_hit_time_ms":
+			if f, err := strconv.ParseFloat(value, 64); err == nil {
+				cs.AvgHitTimeMs = &f
+			}
+		case "avg_cache_miss_time_ms":
+			if f, err := strconv.ParseFloat(value, 64); err == nil {
+				cs.AvgMissTimeMs = &f
+			}
+		case "total_time_saved_ms":
+			cs.TotalTimeSavedMs, _ = strconv.ParseFloat(value, 64)
 		}
 	}
 	return cs, nil

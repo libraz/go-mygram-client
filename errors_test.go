@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
+
+// Error types and their interoperation with the standard library (errors.go).
 
 func TestTimeoutErrorSatisfiesNetError(t *testing.T) {
 	var err error = &TimeoutError{Message: "command timeout"}
@@ -42,21 +45,6 @@ func TestTimeoutErrorWithoutCauseDoesNotMatchDeadline(t *testing.T) {
 	if errors.Is(err, context.DeadlineExceeded) {
 		t.Error("a config-driven timeout must not report context.DeadlineExceeded")
 	}
-}
-
-// silentServer accepts a connection and reads the command but never replies,
-// so the client's read blocks until its deadline fires.
-func silentServer(t *testing.T) string {
-	t.Helper()
-	addr, cleanup := mockServer(t, func(conn net.Conn) {
-		buf := make([]byte, 4096)
-		_, _ = conn.Read(buf)
-		// Hold the connection open without responding.
-		time.Sleep(2 * time.Second)
-		_ = conn.Close()
-	})
-	t.Cleanup(cleanup)
-	return addr
 }
 
 func TestCommandTimeoutFromContextWrapsDeadline(t *testing.T) {
@@ -107,5 +95,29 @@ func TestCommandTimeoutFromConfigDoesNotWrapDeadline(t *testing.T) {
 	var ne net.Error
 	if !errors.As(err, &ne) || !ne.Timeout() {
 		t.Error("config timeout should still present as a net.Error timeout")
+	}
+}
+
+func TestServerErrorSurfacesCode(t *testing.T) {
+	c, _ := connectRecording(t, "ERROR 4007 Table not found: ghosts\r\n")
+
+	_, err := c.Search("ghosts", "x", SearchOptions{})
+	se, ok := err.(*ServerError)
+	if !ok {
+		t.Fatalf("expected *ServerError, got %T (%v)", err, err)
+	}
+	if se.Code != ErrCodeTableNotFound {
+		t.Errorf("Code = %d, want %d", se.Code, ErrCodeTableNotFound)
+	}
+	if se.Message != "Table not found: ghosts" {
+		t.Errorf("Message = %q", se.Message)
+	}
+	if !strings.Contains(se.Error(), "code 4007") {
+		t.Errorf("Error() = %q, want it to name the code", se.Error())
+	}
+
+	code, ok := ServerErrorCode(err)
+	if !ok || code != ErrCodeTableNotFound {
+		t.Errorf("ServerErrorCode = (%d, %v)", code, ok)
 	}
 }

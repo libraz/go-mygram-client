@@ -351,6 +351,24 @@ func (p *Pool) DumpSaveContext(ctx context.Context, filepath string) (string, er
 	return out, err
 }
 
+// DumpSaveAndWait saves the index and blocks until the dump has finished.
+func (p *Pool) DumpSaveAndWait(filepath string) (string, error) {
+	return p.DumpSaveAndWaitContext(context.Background(), filepath)
+}
+
+// DumpSaveAndWaitContext saves the index and blocks until the dump has
+// finished. The DUMP STATUS polling runs on the borrowed connection, so the
+// slot stays checked out for the whole operation.
+func (p *Pool) DumpSaveAndWaitContext(ctx context.Context, filepath string) (string, error) {
+	var out string
+	err := p.run(ctx, false, func(c *Client) error {
+		var e error
+		out, e = c.DumpSaveAndWaitContext(ctx, filepath)
+		return e
+	})
+	return out, err
+}
+
 // DumpLoad loads the index from a file.
 func (p *Pool) DumpLoad(filepath string) error {
 	return p.DumpLoadContext(context.Background(), filepath)

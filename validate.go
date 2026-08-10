@@ -88,7 +88,7 @@ func ensureSafeFilters(filters map[string]string) error {
 }
 
 // calculateQueryExpressionLength calculates the total character count of a query expression.
-func calculateQueryExpressionLength(query string, andTerms, notTerms []string, filters map[string]string, sortColumn string) int {
+func calculateQueryExpressionLength(query string, andTerms, notTerms []string, filters map[string]string, conditions []FilterCondition, sortColumn string) int {
 	length := len([]rune(query))
 	for _, t := range andTerms {
 		length += len([]rune(t))
@@ -99,6 +99,12 @@ func calculateQueryExpressionLength(query string, andTerms, notTerms []string, f
 	for k, v := range filters {
 		length += len([]rune(k)) + len([]rune(v))
 	}
+	// Typed conditions occupy the same expression budget as the equality map;
+	// leaving them out would let a request built entirely from them bypass the
+	// limit the server enforces on the assembled command.
+	for _, c := range conditions {
+		length += len([]rune(c.Key)) + len([]rune(c.Value))
+	}
 	if sortColumn != "" {
 		length += len([]rune(sortColumn))
 	}
@@ -106,11 +112,11 @@ func calculateQueryExpressionLength(query string, andTerms, notTerms []string, f
 }
 
 // ensureQueryLengthWithinLimit verifies that the query expression length does not exceed the limit.
-func ensureQueryLengthWithinLimit(query string, andTerms, notTerms []string, filters map[string]string, sortColumn string, maxLength int) error {
+func ensureQueryLengthWithinLimit(query string, andTerms, notTerms []string, filters map[string]string, conditions []FilterCondition, sortColumn string, maxLength int) error {
 	if maxLength <= 0 {
 		return nil
 	}
-	length := calculateQueryExpressionLength(query, andTerms, notTerms, filters, sortColumn)
+	length := calculateQueryExpressionLength(query, andTerms, notTerms, filters, conditions, sortColumn)
 	if length > maxLength {
 		return &ValidationError{
 			Message: fmt.Sprintf("query expression length (%d) exceeds maximum allowed length of %d characters", length, maxLength),
@@ -120,9 +126,11 @@ func ensureQueryLengthWithinLimit(query string, andTerms, notTerms []string, fil
 }
 
 // validateIdentifier validates an unquoted identifier such as a table name,
-// primary key, sort column or filter key. Identifiers are sent on the wire
-// without quoting; embedded whitespace would split the value into multiple
-// tokens and corrupt the protocol stream.
+// sort column, facet column or filter key. Identifiers are sent on the wire
+// without quoting, so embedded whitespace would split the value into multiple
+// tokens and a quote or backslash would open a quoted literal — either way the
+// rest of the command would be reinterpreted. Mirrors the C++ client's
+// ValidateIdentifier.
 func validateIdentifier(value, fieldName string) error {
 	if value == "" {
 		return &ValidationError{Message: fmt.Sprintf("input for %s is empty", fieldName)}
@@ -142,72 +150,83 @@ func validateIdentifier(value, fieldName string) error {
 				Message: fmt.Sprintf("input for %s contains whitespace, which is not allowed in identifiers", fieldName),
 			}
 		}
-	}
-	return nil
-}
-
-// validateTableName validates a table name.
-func validateTableName(table string) error {
-	if table == "" {
-		return &ValidationError{Message: "table name must not be empty"}
-	}
-	for _, r := range table {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return &ValidationError{Message: fmt.Sprintf("table name contains invalid character: %q", r)}
-		}
-	}
-	return nil
-}
-
-// validatePrimaryKey validates a primary key. Primary keys are sent unquoted
-// on the wire and therefore must not contain whitespace either.
-func validatePrimaryKey(pk string) error {
-	if pk == "" {
-		return &ValidationError{Message: "primary key must not be empty"}
-	}
-	if err := ensureSafeValue(pk, "primary_key"); err != nil {
-		return err
-	}
-	for _, r := range pk {
-		if unicode.IsSpace(r) {
+		if r == '"' || r == '\'' || r == '\\' {
 			return &ValidationError{
-				Message: fmt.Sprintf("primary key contains whitespace, which is not allowed: %q", r),
+				Message: fmt.Sprintf("input for %s contains protocol delimiter %q, which is not allowed in identifiers", fieldName, r),
 			}
 		}
 	}
 	return nil
 }
 
-// quoteTokenIfNeeded wraps a value in double quotes when it would otherwise
-// split into multiple protocol tokens, escaping the characters that are
-// special inside a quoted token.
-//
-// This mirrors the C++ client's EscapeQueryString / QuoteCommandArgumentIfNeeded:
-// a value is quoted when it is empty or contains whitespace or a quote
-// character. Inside the quotes, '"' and '\' are backslash-escaped and any
-// remaining control characters (code < 0x20) are dropped. Values that need no
-// quoting are returned verbatim so simple single-token queries stay
-// byte-identical on the wire.
-//
-// quoteOnBackslash selects which upstream helper is mirrored: query strings
-// follow EscapeQueryString (a lone backslash does NOT force quoting), while
-// command arguments follow QuoteCommandArgumentIfNeeded (a backslash does).
-func quoteTokenIfNeeded(value string, quoteOnBackslash bool) string {
-	if value == "" {
-		return `""`
+// validateTableName validates a table name, which is an identifier.
+func validateTableName(table string) error {
+	if table == "" {
+		return &ValidationError{Message: "table name must not be empty"}
 	}
+	return validateIdentifier(table, "table name")
+}
 
-	needsQuotes := false
-	for _, r := range value {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' || (quoteOnBackslash && r == '\\') {
-			needsQuotes = true
-			break
+// validateFilters validates both filter forms of a request: the equality map
+// and the typed comparison conditions.
+func validateFilters(filters map[string]string, conditions []FilterCondition) error {
+	if err := ensureSafeFilters(filters); err != nil {
+		return err
+	}
+	for k := range filters {
+		if err := validateIdentifier(k, "filter key"); err != nil {
+			return err
 		}
 	}
-	if !needsQuotes {
-		return value
+	for i, cond := range conditions {
+		if err := validateIdentifier(cond.Key, fmt.Sprintf("filterConditions[%d].key", i)); err != nil {
+			return err
+		}
+		if !cond.Op.valid() {
+			return &ValidationError{
+				Message: fmt.Sprintf("invalid filter operator %d in filterConditions[%d]", cond.Op, i),
+			}
+		}
+		if err := ensureSafeValue(cond.Value, fmt.Sprintf("filterConditions[%d].value", i)); err != nil {
+			return err
+		}
 	}
+	return nil
+}
 
+// validateSort validates the two ways a search can request an ordering. A
+// command carries exactly one SORT clause, so naming a column and asking for a
+// primary-key ordering at the same time is a caller error rather than a
+// silently discarded option.
+func validateSort(sortColumn string, primaryKey PrimaryKeySort) error {
+	if !primaryKey.valid() {
+		return &ValidationError{Message: fmt.Sprintf("invalid primary key sort %d", primaryKey)}
+	}
+	if sortColumn == "" {
+		return nil
+	}
+	if primaryKey != PrimaryKeySortDefault {
+		return &ValidationError{
+			Message: "sortColumn and sortPrimaryKey are mutually exclusive: a request carries a single SORT clause",
+		}
+	}
+	return validateIdentifier(sortColumn, "sort column")
+}
+
+// validateQueryMode rejects a mode outside the defined constants, so an
+// uninitialized or miscast value cannot silently fall back to literal search.
+func validateQueryMode(mode QueryMode) error {
+	if mode != QueryLiteral && mode != QueryBoolean {
+		return &ValidationError{Message: fmt.Sprintf("invalid query mode %d", mode)}
+	}
+	return nil
+}
+
+// quoteToken wraps a value in double quotes, backslash-escaping '"' and '\'
+// and dropping any remaining control character so it cannot break the framing.
+// Callers decide whether quoting is needed; a value that needs none is sent
+// verbatim so simple single-token queries stay byte-identical on the wire.
+func quoteToken(value string) string {
 	var sb strings.Builder
 	sb.Grow(len(value) + 2)
 	sb.WriteByte('"')
@@ -227,6 +246,23 @@ func quoteTokenIfNeeded(value string, quoteOnBackslash bool) string {
 	return sb.String()
 }
 
+// queryReservedWords lists the tokens the server's query grammar consumes as
+// clause keywords. A literal search term equal to one of them must be quoted,
+// or the server would read it as the start of a clause instead of as data.
+var queryReservedWords = map[string]bool{
+	"AND":       true,
+	"OR":        true,
+	"NOT":       true,
+	"FILTER":    true,
+	"SORT":      true,
+	"LIMIT":     true,
+	"OFFSET":    true,
+	"HIGHLIGHT": true,
+	"FUZZY":     true,
+	"FACET":     true,
+	"ORDER":     true,
+}
+
 // escapeQueryString quotes and escapes a free-form query value for use as a
 // wire token.
 //
@@ -234,12 +270,70 @@ func quoteTokenIfNeeded(value string, quoteOnBackslash bool) string {
 // unambiguous: an unquoted empty arg would collapse into surrounding
 // whitespace and produce a malformed command (e.g. "SEARCH table  AND foo").
 //
-// Values containing whitespace, double quotes or single quotes are wrapped
-// in double quotes with internal quotes/backslashes escaped. Control
-// characters are stripped to prevent command injection. A lone backslash does
-// not force quoting, matching the C++ client's EscapeQueryString.
+// A value is quoted when it is a standalone clause keyword, or when it
+// contains whitespace, a quote, a backslash or a parenthesis — all of which
+// the server's tokenizer or expression parser would otherwise read as syntax.
+// Inside the quotes, '"' and '\' are backslash-escaped and control characters
+// are stripped to prevent command injection. Mirrors the C++ client's
+// EscapeQueryString.
 func escapeQueryString(value string) string {
-	return quoteTokenIfNeeded(value, false)
+	if value == "" {
+		return `""`
+	}
+	if queryReservedWords[strings.ToUpper(value)] {
+		return quoteToken(value)
+	}
+	for _, r := range value {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' || r == '\\' || r == '(' || r == ')' {
+			return quoteToken(value)
+		}
+	}
+	return value
+}
+
+// escapeProtocolToken quotes a data token — a primary key, say — reversibly:
+// unlike escapeQueryString it encodes control characters as escape sequences
+// the server's tokenizer decodes, rather than dropping them, so any value the
+// server can return can also be sent back to it. Mirrors the C++ client's
+// EscapeProtocolToken.
+func escapeProtocolToken(value string) string {
+	needsQuotes := value == ""
+	for _, r := range value {
+		if unicode.IsSpace(r) || isControlChar(r) || r == '"' || r == '\'' || r == '\\' {
+			needsQuotes = true
+			break
+		}
+	}
+	if !needsQuotes {
+		return value
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(value) + 2)
+	sb.WriteByte('"')
+	// Escaping is defined over bytes: a multi-byte rune has no byte below 0x80,
+	// so its bytes pass through untouched and the encoding stays reversible.
+	for i := 0; i < len(value); i++ {
+		ch := value[i]
+		switch {
+		case ch == '\\':
+			sb.WriteString(`\\`)
+		case ch == '"':
+			sb.WriteString(`\"`)
+		case ch == '\r':
+			sb.WriteString(`\r`)
+		case ch == '\n':
+			sb.WriteString(`\n`)
+		case ch == '\t':
+			sb.WriteString(`\t`)
+		case ch < 0x20 || ch == 0x7f:
+			fmt.Fprintf(&sb, `\x%02X`, ch)
+		default:
+			sb.WriteByte(ch)
+		}
+	}
+	sb.WriteByte('"')
+	return sb.String()
 }
 
 // quoteCommandArgument quotes a free-form command argument (e.g. a SET value,
@@ -251,12 +345,18 @@ func escapeQueryString(value string) string {
 // first (returning an error rather than silently stripping them); an empty
 // value is allowed and surfaced as the explicit empty token "".
 func quoteCommandArgument(value, fieldName string) (string, error) {
-	if value != "" {
-		if err := ensureSafeValue(value, fieldName); err != nil {
-			return "", err
+	if value == "" {
+		return `""`, nil
+	}
+	if err := ensureSafeValue(value, fieldName); err != nil {
+		return "", err
+	}
+	for _, r := range value {
+		if unicode.IsSpace(r) || r == '"' || r == '\'' || r == '\\' {
+			return quoteToken(value), nil
 		}
 	}
-	return quoteTokenIfNeeded(value, true), nil
+	return value, nil
 }
 
 // QualifyTableIdentity builds a database-qualified table identity
@@ -364,16 +464,10 @@ func validateHighlight(h *HighlightOptions) error {
 	return nil
 }
 
-// validateFacetColumn validates a FACET column name. Same rules as table names:
-// must be non-empty and contain no control or whitespace characters.
+// validateFacetColumn validates a FACET column name, which is an identifier.
 func validateFacetColumn(column string) error {
 	if column == "" {
 		return &ValidationError{Message: "facet column must not be empty"}
 	}
-	for _, r := range column {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return &ValidationError{Message: fmt.Sprintf("facet column contains invalid character: %q", r)}
-		}
-	}
-	return nil
+	return validateIdentifier(column, "facet column")
 }

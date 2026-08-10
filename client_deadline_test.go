@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// Deadline handling (client.go): a connection whose deadline cannot be set is
+// unusable, so it is closed and the failure is classified by whether the
+// command had already been written.
+
 // deadlineFailConn wraps a net.Conn and forces SetWriteDeadline and/or
 // SetReadDeadline to fail, to exercise the deadline-failure paths that a real
 // socket only hits when it is already closed or reset.

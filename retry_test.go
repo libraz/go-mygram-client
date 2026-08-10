@@ -5,6 +5,8 @@ import (
 	"testing"
 )
 
+// Retry and connection-reuse classification (retry.go).
+
 func TestConnReusable(t *testing.T) {
 	tests := []struct {
 		name string
@@ -69,45 +71,40 @@ func TestShouldRetry(t *testing.T) {
 	}
 }
 
-func TestNewPoolDefaults(t *testing.T) {
-	p := NewPool(PoolConfig{})
-	if p.cfg.MaxOpenConns != defaultMaxOpenConns {
-		t.Errorf("MaxOpenConns = %d, want %d", p.cfg.MaxOpenConns, defaultMaxOpenConns)
+func TestShouldRetryTransientServerErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		idempotent bool
+		want       bool
+	}{
+		{"busy is retried", &ServerError{Code: ErrCodeServerBusy}, true, true},
+		{"loading is retried", &ServerError{Code: ErrCodeServerLoading}, true, true},
+		{"not ready is retried", &ServerError{Code: ErrCodeServerNotReady}, true, true},
+		{"busy is retried for a state-changing command too", &ServerError{Code: ErrCodeServerBusy}, false, true},
+		{"table not found is not retried", &ServerError{Code: ErrCodeTableNotFound}, true, false},
+		{"uncoded frame is not retried", &ServerError{Message: "server is busy"}, true, false},
 	}
-	if p.cfg.MaxIdleConns != defaultMaxOpenConns {
-		t.Errorf("MaxIdleConns = %d, want %d", p.cfg.MaxIdleConns, defaultMaxOpenConns)
-	}
-	if p.cfg.Retry.MaxRetries != defaultMaxRetries {
-		t.Errorf("MaxRetries = %d, want %d", p.cfg.Retry.MaxRetries, defaultMaxRetries)
-	}
-	if p.cfg.Retry.BaseBackoff != defaultBaseBackoff {
-		t.Errorf("BaseBackoff = %v, want %v", p.cfg.Retry.BaseBackoff, defaultBaseBackoff)
-	}
-	if cap(p.sem) != defaultMaxOpenConns {
-		t.Errorf("cap(sem) = %d, want %d", cap(p.sem), defaultMaxOpenConns)
-	}
-}
-
-func TestNewPoolClampsIdleToOpen(t *testing.T) {
-	p := NewPool(PoolConfig{MaxOpenConns: 3, MaxIdleConns: 10})
-	if p.cfg.MaxIdleConns != 3 {
-		t.Errorf("MaxIdleConns = %d, want clamped to 3", p.cfg.MaxIdleConns)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRetry(tc.err, tc.idempotent, 0, 1); got != tc.want {
+				t.Errorf("shouldRetry = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestNewPoolExplicitNoRetry(t *testing.T) {
-	// A caller that sets a backoff but wants zero retries must keep zero.
-	p := NewPool(PoolConfig{Retry: RetryPolicy{MaxRetries: 0, BaseBackoff: 10}})
-	if p.cfg.Retry.MaxRetries != 0 {
-		t.Errorf("MaxRetries = %d, want 0 (explicit)", p.cfg.Retry.MaxRetries)
+func TestTransientServerErrorRespectsAttemptBudget(t *testing.T) {
+	err := &ServerError{Code: ErrCodeServerBusy}
+	if shouldRetry(err, true, 1, 1) {
+		t.Error("shouldRetry ignored the exhausted attempt budget")
 	}
 }
 
-func TestNewPoolNegativeMaxRetriesDisables(t *testing.T) {
-	// A negative MaxRetries is the intuitive opt-out and must stay at zero
-	// rather than being re-inflated to the default policy.
-	p := NewPool(PoolConfig{Retry: RetryPolicy{MaxRetries: -1}})
-	if p.cfg.Retry.MaxRetries != 0 {
-		t.Errorf("MaxRetries = %d, want 0 (negative disables retries)", p.cfg.Retry.MaxRetries)
+// A connection that returned a server error is still healthy, so a transient
+// rejection must not cost the pool its socket.
+func TestTransientServerErrorKeepsConnection(t *testing.T) {
+	if !connReusable(&ServerError{Code: ErrCodeServerBusy}) {
+		t.Error("connReusable = false for a server error, want true")
 	}
 }

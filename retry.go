@@ -39,10 +39,10 @@ func connReusable(err error) bool {
 }
 
 // shouldRetry decides whether a failed command may be retried. It never retries
-// server errors, validation errors, or post-send timeouts. A connection error
-// or a connect-phase (pre-send) timeout is retried when the command never
-// reached the server (safe for any command) or when the command is idempotent,
-// subject to the attempt budget.
+// validation errors, post-send timeouts, or a server error that names a
+// deterministic fault. A connection error or a connect-phase (pre-send) timeout
+// is retried when the command never reached the server (safe for any command)
+// or when the command is idempotent, subject to the attempt budget.
 func shouldRetry(err error, idempotent bool, attempt, maxRetries int) bool {
 	if attempt >= maxRetries {
 		return false
@@ -58,6 +58,14 @@ func shouldRetry(err error, idempotent bool, attempt, maxRetries int) bool {
 		// command; a post-send read timeout may have been acted upon and is not
 		// retried.
 		return e.beforeSend
+	case *ServerError:
+		// The retry decision comes from the server's own error code rather than
+		// from its message text (MygramDB >= v1.10). The transient codes are
+		// rejections issued before the command ran — loading, not ready, busy —
+		// so re-issuing is safe even for a state-changing command. Every other
+		// code, and every uncoded frame from an older server, is deterministic
+		// and would only fail the same way again.
+		return e.Retryable()
 	default:
 		return false
 	}

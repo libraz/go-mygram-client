@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +84,18 @@ func NewClientWithConfig(config ClientConfig) *Client {
 	if config.TimeoutMs == 0 {
 		config.TimeoutMs = defaults.TimeoutMs
 	}
+	if config.DumpSaveTimeoutMs == 0 {
+		config.DumpSaveTimeoutMs = defaults.DumpSaveTimeoutMs
+	}
+	if config.DumpLoadTimeoutMs == 0 {
+		config.DumpLoadTimeoutMs = defaults.DumpLoadTimeoutMs
+	}
+	if config.DumpVerifyTimeoutMs == 0 {
+		config.DumpVerifyTimeoutMs = defaults.DumpVerifyTimeoutMs
+	}
+	if config.OptimizeTimeoutMs == 0 {
+		config.OptimizeTimeoutMs = defaults.OptimizeTimeoutMs
+	}
 	if config.RecvBufferSize == 0 {
 		config.RecvBufferSize = defaults.RecvBufferSize
 	}
@@ -116,11 +129,22 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 	return nil
 }
 
+// connectTimeout is the deadline for a dial and the AUTH exchange that follows
+// it. ConnectTimeoutMs governs when set; otherwise the ordinary command timeout
+// applies, which is how the client behaved before the knob existed.
+func (c *Client) connectTimeout() time.Duration {
+	ms := c.config.ConnectTimeoutMs
+	if ms <= 0 {
+		ms = c.config.TimeoutMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 // dial opens a new connection to the configured endpoint and applies TCP
 // keep-alive. It performs no locking and does not touch c.conn, so it is used
 // both by ConnectContext (under the lock) and by the auto-reconnect path.
 func (c *Client) dial(ctx context.Context) (net.Conn, error) {
-	timeout := time.Duration(c.config.TimeoutMs) * time.Millisecond
+	timeout := c.connectTimeout()
 	var d net.Dialer
 	d.Timeout = timeout
 	if c.config.SocketPath == "" && !c.config.DisableTCPKeepAlive {
@@ -152,7 +176,56 @@ func (c *Client) dial(ctx context.Context) (net.Conn, error) {
 		// Nothing was sent, so a retry on a fresh dial is safe for any command.
 		return nil, &ConnectionError{Message: "failed to connect", Err: err, beforeSend: true}
 	}
+
+	// Administrative authorization is per-connection state on the server, so a
+	// configured token must be replayed on every socket, including the ones a
+	// reconnect opens. Doing it here keeps a reconnected client as privileged
+	// as the original.
+	if c.config.AdminToken != "" {
+		if err := c.authenticateConn(conn, timeout); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
 	return conn, nil
+}
+
+// authenticateConn sends AUTH on a freshly dialed connection and verifies the
+// acknowledgement. The connection is not yet published as c.conn, so failures
+// are reported to the caller, which closes it.
+func (c *Client) authenticateConn(conn net.Conn, timeout time.Duration) error {
+	token, err := quoteCommandArgument(c.config.AdminToken, "admin token")
+	if err != nil {
+		return err
+	}
+	if err := conn.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return &ConnectionError{Message: "failed to set write deadline for AUTH", Err: err, beforeSend: true}
+	}
+	if _, err := conn.Write([]byte("AUTH " + token + "\r\n")); err != nil {
+		return &ConnectionError{Message: "failed to send AUTH", Err: err, beforeSend: true}
+	}
+	response, err := c.readFrom(conn, timeout)
+	if err != nil {
+		return err
+	}
+	return checkAuthResponse(response)
+}
+
+// authenticatedResponse is the acknowledgement the server returns for a
+// successful AUTH.
+const authenticatedResponse = "OK AUTHENTICATED"
+
+// checkAuthResponse normalizes an AUTH reply and converts anything other than
+// the acknowledgement into an error.
+func checkAuthResponse(response string) error {
+	normalized := strings.TrimSpace(strings.ReplaceAll(response, "\r\n", "\n"))
+	if strings.HasPrefix(normalized, errorPrefix) {
+		return parseErrorFrame(normalized)
+	}
+	if normalized != authenticatedResponse {
+		return &ProtocolError{Message: "unexpected AUTH response: " + normalized}
+	}
+	return nil
 }
 
 // reconnectLocked tears down any half-open socket and dials a fresh one. The
@@ -190,6 +263,41 @@ func (c *Client) IsConnected() bool {
 	return c.conn != nil
 }
 
+// Authenticate authorizes the connection for administrative commands
+// (MygramDB >= v1.10).
+func (c *Client) Authenticate(token string) error {
+	return c.AuthenticateContext(context.Background(), token)
+}
+
+// AuthenticateContext authorizes the connection for administrative commands
+// with the given context.
+//
+// A server configured with api.admin_token gates DUMP, SYNC, REPLICATION,
+// CONFIG, CACHE, OPTIMIZE, DEBUG, SET and SHOW VARIABLES behind AUTH, and the
+// grant is per-connection. The token is remembered on the client so a
+// reconnect re-authenticates before the next command runs; setting
+// ClientConfig.AdminToken up front does the same thing without an explicit
+// call, and is the only way to authenticate the connections a Pool opens.
+func (c *Client) AuthenticateContext(ctx context.Context, token string) error {
+	if token == "" {
+		return &ValidationError{Message: "admin token must not be empty"}
+	}
+	quoted, err := quoteCommandArgument(token, "admin token")
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.config.AdminToken = token
+	c.mu.Unlock()
+
+	response, err := c.SendCommandContext(ctx, "AUTH "+quoted)
+	if err != nil {
+		return err
+	}
+	return checkAuthResponse(response)
+}
+
 // SendCommand sends a raw command to the server and returns the response.
 func (c *Client) SendCommand(command string) (string, error) {
 	return c.SendCommandContext(context.Background(), command)
@@ -203,6 +311,13 @@ func (c *Client) SendCommand(command string) (string, error) {
 // cancellation of a deadline-less context does not interrupt it; the command
 // still completes or hits TimeoutMs.
 func (c *Client) SendCommandContext(ctx context.Context, command string) (string, error) {
+	return c.sendCommandWithTimeout(ctx, command, c.config.TimeoutMs)
+}
+
+// sendCommandWithTimeout is SendCommandContext with an explicit I/O timeout, so
+// a command that rebuilds or traverses the whole index can outlive the ordinary
+// request timeout. timeoutMs of 0 or less falls back to TimeoutMs.
+func (c *Client) sendCommandWithTimeout(ctx context.Context, command string, timeoutMs int) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -210,7 +325,10 @@ func (c *Client) SendCommandContext(ctx context.Context, command string) (string
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	timeout := time.Duration(c.config.TimeoutMs) * time.Millisecond
+	if timeoutMs <= 0 {
+		timeoutMs = c.config.TimeoutMs
+	}
+	timeout := time.Duration(timeoutMs) * time.Millisecond
 
 	// Use context deadline if it is shorter, and remember that it was the
 	// binding deadline so a resulting timeout can be attributed to the context.
@@ -298,15 +416,35 @@ func (c *Client) finishCommand(ctx context.Context, timeout time.Duration, ctxDe
 	response = strings.TrimSpace(response)
 
 	// Check for server error
-	if strings.HasPrefix(response, "ERROR ") {
-		return "", &ServerError{Message: response[6:]}
+	if strings.HasPrefix(response, errorPrefix) {
+		return "", parseErrorFrame(response)
 	}
 
 	return response, nil
 }
 
-// readResponse reads a complete response from the server.
+// readResponse reads a complete response on the client's current connection.
+// A failure other than a timeout leaves the connection unusable, so it is
+// closed and cleared here; a timeout leaves the socket intact for the caller
+// to classify.
 func (c *Client) readResponse(timeout time.Duration) (string, error) {
+	response, err := c.readFrom(c.conn, timeout)
+	if err != nil {
+		if _, isTimeout := err.(*TimeoutError); !isTimeout {
+			_ = c.conn.Close()
+			c.conn = nil
+		}
+		return "", err
+	}
+	return response, nil
+}
+
+// readFrom reads one complete response frame from conn. It has no side effects
+// on the client's connection state, so it also serves the connection handshake,
+// which runs before the socket is published as c.conn.
+//
+// The scratch buffer it reuses is guarded by c.mu, which every caller holds.
+func (c *Client) readFrom(conn net.Conn, timeout time.Duration) (string, error) {
 	if c.scratch == nil {
 		c.scratch = make([]byte, c.config.RecvBufferSize)
 	}
@@ -314,21 +452,17 @@ func (c *Client) readResponse(timeout time.Duration) (string, error) {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		if err := c.conn.SetReadDeadline(deadline); err != nil {
+		if err := conn.SetReadDeadline(deadline); err != nil {
 			// The command was already written, so its outcome is unknown; the
-			// connection cannot be reused. Close it (beforeSend stays false).
-			_ = c.conn.Close()
-			c.conn = nil
+			// connection cannot be reused (beforeSend stays false).
 			return "", &ConnectionError{Message: "failed to set read deadline", Err: err}
 		}
 
-		n, err := c.conn.Read(c.scratch)
+		n, err := conn.Read(c.scratch)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				return "", &TimeoutError{Message: "command timeout"}
 			}
-			_ = c.conn.Close()
-			c.conn = nil
 			return "", &ConnectionError{Message: "failed to read response", Err: err}
 		}
 
@@ -336,9 +470,7 @@ func (c *Client) readResponse(timeout time.Duration) (string, error) {
 
 		if c.config.MaxResponseSize > 0 && sb.Len() > c.config.MaxResponseSize {
 			// The stream position is now unknown, so the connection cannot be
-			// reused; close it and report a protocol violation.
-			_ = c.conn.Close()
-			c.conn = nil
+			// reused; report a protocol violation.
 			return "", &ProtocolError{Message: "response exceeds MaxResponseSize"}
 		}
 
@@ -489,20 +621,16 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 	if err := ensureSafeValues(opts.NotTerms, "notTerms"); err != nil {
 		return nil, err
 	}
-	if err := ensureSafeFilters(opts.Filters); err != nil {
+	if err := validateFilters(opts.Filters, opts.FilterConditions); err != nil {
 		return nil, err
 	}
-	for k := range opts.Filters {
-		if err := validateIdentifier(k, "filter key"); err != nil {
-			return nil, err
-		}
+	if err := validateQueryMode(opts.QueryMode); err != nil {
+		return nil, err
 	}
-	if opts.SortColumn != "" {
-		if err := validateIdentifier(opts.SortColumn, "sort column"); err != nil {
-			return nil, err
-		}
+	if err := validateSort(opts.SortColumn, opts.SortPrimaryKey); err != nil {
+		return nil, err
 	}
-	if err := ensureQueryLengthWithinLimit(query, opts.AndTerms, opts.NotTerms, opts.Filters, opts.SortColumn, c.config.MaxQueryLength); err != nil {
+	if err := ensureQueryLengthWithinLimit(query, opts.AndTerms, opts.NotTerms, opts.Filters, opts.FilterConditions, opts.SortColumn, c.config.MaxQueryLength); err != nil {
 		return nil, err
 	}
 	if err := validateFuzzy(opts.Fuzzy); err != nil {
@@ -512,7 +640,14 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 		return nil, err
 	}
 
-	parts := []string{"SEARCH", table, escapeQueryString(query)}
+	// A boolean query is the caller's own expression and goes on the wire
+	// verbatim so the server's AST parser sees its AND / OR / NOT operators and
+	// parentheses; literal text is quoted so the same words stay data.
+	searchText := escapeQueryString(query)
+	if opts.QueryMode == QueryBoolean {
+		searchText = query
+	}
+	parts := []string{"SEARCH", table, searchText}
 
 	for _, term := range opts.AndTerms {
 		parts = append(parts, "AND", escapeQueryString(term))
@@ -520,15 +655,19 @@ func (c *Client) SearchContext(ctx context.Context, table, query string, opts Se
 	for _, term := range opts.NotTerms {
 		parts = append(parts, "NOT", escapeQueryString(term))
 	}
-	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
-	}
-	if opts.SortColumn != "" {
+	appendFilters(&parts, opts.Filters, opts.FilterConditions)
+	switch {
+	case opts.SortColumn != "":
 		dir := "ASC"
 		if opts.SortDesc {
 			dir = "DESC"
 		}
 		parts = append(parts, "SORT", opts.SortColumn, dir)
+	case opts.SortPrimaryKey != PrimaryKeySortDefault:
+		// The column-less shorthand orders by primary key. Omitting the clause
+		// selects the same descending default, so only an explicit request
+		// reaches the wire.
+		parts = append(parts, "SORT", opts.SortPrimaryKey.wire())
 	}
 
 	if opts.Fuzzy > 0 {
@@ -642,6 +781,29 @@ func appendHighlightClause(parts *[]string, h *HighlightOptions) {
 	}
 }
 
+// appendFilters appends the FILTER clauses for both filter forms: the
+// equality-only map first, then the typed comparison conditions in the order
+// the caller gave them.
+//
+// Map iteration order is randomized in Go, so the keys are sorted to keep one
+// set of options producing one byte-identical command — which matters because
+// the server's query cache keys on the command text.
+func appendFilters(parts *[]string, filters map[string]string, conditions []FilterCondition) {
+	if len(filters) > 0 {
+		keys := make([]string, 0, len(filters))
+		for k := range filters {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			*parts = append(*parts, "FILTER", k, "=", escapeQueryString(filters[k]))
+		}
+	}
+	for _, cond := range conditions {
+		*parts = append(*parts, "FILTER", cond.Key, cond.Op.wire(), escapeQueryString(cond.Value))
+	}
+}
+
 // appendLimitOffset appends the LIMIT / OFFSET clause, matching the C++
 // client's AppendLimitOffset:
 //
@@ -684,15 +846,10 @@ func (c *Client) FacetContext(ctx context.Context, table, column string, opts Fa
 	if err := ensureSafeValues(opts.NotTerms, "notTerms"); err != nil {
 		return nil, err
 	}
-	if err := ensureSafeFilters(opts.Filters); err != nil {
+	if err := validateFilters(opts.Filters, opts.FilterConditions); err != nil {
 		return nil, err
 	}
-	for k := range opts.Filters {
-		if err := validateIdentifier(k, "filter key"); err != nil {
-			return nil, err
-		}
-	}
-	if err := ensureQueryLengthWithinLimit(opts.Query, opts.AndTerms, opts.NotTerms, opts.Filters, "", c.config.MaxQueryLength); err != nil {
+	if err := ensureQueryLengthWithinLimit(opts.Query, opts.AndTerms, opts.NotTerms, opts.Filters, opts.FilterConditions, "", c.config.MaxQueryLength); err != nil {
 		return nil, err
 	}
 
@@ -706,8 +863,12 @@ func (c *Client) FacetContext(ctx context.Context, table, column string, opts Fa
 	for _, term := range opts.NotTerms {
 		parts = append(parts, "NOT", escapeQueryString(term))
 	}
-	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
+	appendFilters(&parts, opts.Filters, opts.FilterConditions)
+	// FACET pages with a separate OFFSET clause rather than the "offset,count"
+	// LIMIT form that SEARCH uses; the server accepts them in either order but
+	// this matches the reference client's wire output.
+	if opts.Offset > 0 {
+		parts = append(parts, "OFFSET", strconv.Itoa(opts.Offset))
 	}
 	if opts.Limit > 0 {
 		parts = append(parts, "LIMIT", strconv.Itoa(opts.Limit))
@@ -739,25 +900,25 @@ func (c *Client) CountContext(ctx context.Context, table, query string, opts Cou
 	if err := ensureSafeValues(opts.NotTerms, "notTerms"); err != nil {
 		return nil, err
 	}
-	if err := ensureSafeFilters(opts.Filters); err != nil {
+	if err := validateFilters(opts.Filters, opts.FilterConditions); err != nil {
 		return nil, err
 	}
-	for k := range opts.Filters {
-		if err := validateIdentifier(k, "filter key"); err != nil {
-			return nil, err
-		}
+	if err := validateQueryMode(opts.QueryMode); err != nil {
+		return nil, err
 	}
 
-	parts := []string{"COUNT", table, escapeQueryString(query)}
+	searchText := escapeQueryString(query)
+	if opts.QueryMode == QueryBoolean {
+		searchText = query
+	}
+	parts := []string{"COUNT", table, searchText}
 	for _, term := range opts.AndTerms {
 		parts = append(parts, "AND", escapeQueryString(term))
 	}
 	for _, term := range opts.NotTerms {
 		parts = append(parts, "NOT", escapeQueryString(term))
 	}
-	for k, v := range opts.Filters {
-		parts = append(parts, "FILTER", k, "=", escapeQueryString(v))
-	}
+	appendFilters(&parts, opts.Filters, opts.FilterConditions)
 
 	response, err := c.SendCommandContext(ctx, strings.Join(parts, " "))
 	if err != nil {
@@ -776,11 +937,13 @@ func (c *Client) GetContext(ctx context.Context, table, primaryKey string) (*Doc
 	if err := validateTableName(table); err != nil {
 		return nil, err
 	}
-	if err := validatePrimaryKey(primaryKey); err != nil {
-		return nil, err
+	if primaryKey == "" {
+		return nil, &ValidationError{Message: "primary key must not be empty"}
 	}
 
-	response, err := c.SendCommandContext(ctx, fmt.Sprintf("GET %s %s", table, primaryKey))
+	// A primary key is data, not an identifier: it is escaped reversibly so any
+	// key the server can return is also a key the server can be asked for.
+	response, err := c.SendCommandContext(ctx, fmt.Sprintf("GET %s %s", table, escapeProtocolToken(primaryKey)))
 	if err != nil {
 		return nil, err
 	}
@@ -887,6 +1050,98 @@ func (c *Client) DumpSaveContext(ctx context.Context, filepath string) (string, 
 	return c.SendCommandContext(ctx, cmd)
 }
 
+// dumpStatusPollInterval is how often DumpSaveAndWait re-reads DUMP STATUS
+// while an asynchronous dump is running.
+const dumpStatusPollInterval = 200 * time.Millisecond
+
+// DumpSaveAndWait saves the index and blocks until the dump has finished.
+func (c *Client) DumpSaveAndWait(filepath string) (string, error) {
+	return c.DumpSaveAndWaitContext(context.Background(), filepath)
+}
+
+// DumpSaveAndWaitContext saves the index and blocks until the dump has
+// finished, returning the path the server actually wrote.
+//
+// A large dump is executed asynchronously: the server acknowledges with
+// "OK DUMP_STARTED <path>" and reports progress through DUMP STATUS. DumpSave
+// returns that acknowledgement as-is; this variant polls DUMP STATUS until the
+// operation reaches COMPLETED (returning the path) or FAILED (returning the
+// server's message as a ServerError). A dump small enough to finish inline is
+// acknowledged with "OK SAVED <path>" and returns without polling.
+//
+// The wait is bounded by ClientConfig.DumpSaveTimeoutMs, or by ctx if its
+// deadline is sooner. Timing out does not stop the dump — the server keeps
+// writing, and DumpStatus still reports the outcome.
+func (c *Client) DumpSaveAndWaitContext(ctx context.Context, filepath string) (string, error) {
+	response, err := c.DumpSaveContext(ctx, filepath)
+	if err != nil {
+		return "", err
+	}
+
+	const (
+		savedPrefix   = "OK SAVED "
+		startedPrefix = "OK DUMP_STARTED "
+	)
+	switch {
+	case strings.HasPrefix(response, savedPrefix):
+		return strings.TrimSpace(response[len(savedPrefix):]), nil
+	case strings.HasPrefix(response, startedPrefix):
+		started := strings.TrimSpace(response[len(startedPrefix):])
+		return c.waitForDumpSave(ctx, started)
+	default:
+		return "", &ProtocolError{Message: "unexpected DUMP SAVE response: " + response}
+	}
+}
+
+// waitForDumpSave polls DUMP STATUS until the asynchronous dump identified by
+// startedPath reaches a terminal state.
+func (c *Client) waitForDumpSave(ctx context.Context, startedPath string) (string, error) {
+	timeoutMs := c.config.DumpSaveTimeoutMs
+	if timeoutMs <= 0 {
+		timeoutMs = c.config.TimeoutMs
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+	defer cancel()
+
+	ticker := time.NewTicker(dumpStatusPollInterval)
+	defer ticker.Stop()
+	for {
+		status, err := c.DumpStatusContext(waitCtx)
+		if err != nil {
+			return "", err
+		}
+		switch status.Status {
+		case "COMPLETED":
+			if status.ResultFilepath != "" {
+				return status.ResultFilepath, nil
+			}
+			if status.Filepath != "" {
+				return status.Filepath, nil
+			}
+			return startedPath, nil
+		case "FAILED":
+			message := status.Error
+			if message == "" {
+				message = "DUMP SAVE failed"
+			}
+			return "", &ServerError{Message: message}
+		}
+
+		select {
+		case <-ticker.C:
+		case <-waitCtx.Done():
+			// Distinguish the wait budget running out from the caller giving up:
+			// only the former is a timeout of this client's own making.
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", &TimeoutError{
+				Message: fmt.Sprintf("timed out after %dms waiting for DUMP SAVE to complete", timeoutMs),
+			}
+		}
+	}
+}
+
 // DumpLoad loads the index from a file.
 func (c *Client) DumpLoad(filepath string) error {
 	return c.DumpLoadContext(context.Background(), filepath)
@@ -902,7 +1157,7 @@ func (c *Client) DumpLoadContext(ctx context.Context, filepath string) error {
 		}
 		cmd += " " + safe
 	}
-	_, err := c.SendCommandContext(ctx, cmd)
+	_, err := c.sendCommandWithTimeout(ctx, cmd, c.config.DumpLoadTimeoutMs)
 	return err
 }
 
@@ -931,7 +1186,7 @@ func (c *Client) DumpVerifyContext(ctx context.Context, filepath string) (string
 	if err != nil {
 		return "", err
 	}
-	return c.SendCommandContext(ctx, "DUMP VERIFY "+safe)
+	return c.sendCommandWithTimeout(ctx, "DUMP VERIFY "+safe, c.config.DumpVerifyTimeoutMs)
 }
 
 // DumpInfo retrieves metadata of a dump file.
@@ -971,6 +1226,9 @@ func (c *Client) CacheClear(table string) error {
 func (c *Client) CacheClearContext(ctx context.Context, table string) error {
 	cmd := "CACHE CLEAR"
 	if table != "" {
+		if err := validateTableName(table); err != nil {
+			return err
+		}
 		cmd += " " + table
 	}
 	_, err := c.SendCommandContext(ctx, cmd)
@@ -1008,9 +1266,12 @@ func (c *Client) Optimize(table string) error {
 func (c *Client) OptimizeContext(ctx context.Context, table string) error {
 	cmd := "OPTIMIZE"
 	if table != "" {
+		if err := validateTableName(table); err != nil {
+			return err
+		}
 		cmd += " " + table
 	}
-	_, err := c.SendCommandContext(ctx, cmd)
+	_, err := c.sendCommandWithTimeout(ctx, cmd, c.config.OptimizeTimeoutMs)
 	return err
 }
 

@@ -1,8 +1,11 @@
 package mygram
 
 import (
+	"strings"
 	"testing"
 )
+
+// Response parsing (parser.go).
 
 func TestParseSearchResponse(t *testing.T) {
 	t.Run("basic response", func(t *testing.T) {
@@ -74,6 +77,112 @@ func TestParseSearchResponse(t *testing.T) {
 	})
 }
 
+func TestParseSearchResponseHighlight(t *testing.T) {
+	t.Run("two highlighted results", func(t *testing.T) {
+		response := "OK RESULTS 2\n" +
+			"101\tmachine <em>learning</em> basics\n" +
+			"102\tintro to <em>learning</em>\n"
+		resp, err := parseSearchResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.TotalCount != 2 {
+			t.Errorf("TotalCount = %d, want 2", resp.TotalCount)
+		}
+		if len(resp.Results) != 2 {
+			t.Fatalf("len(Results) = %d, want 2", len(resp.Results))
+		}
+		if resp.Results[0].PrimaryKey != "101" {
+			t.Errorf("Results[0].PrimaryKey = %q, want 101", resp.Results[0].PrimaryKey)
+		}
+		if resp.Results[0].Snippet != "machine <em>learning</em> basics" {
+			t.Errorf("Results[0].Snippet = %q", resp.Results[0].Snippet)
+		}
+		if resp.Results[1].PrimaryKey != "102" {
+			t.Errorf("Results[1].PrimaryKey = %q, want 102", resp.Results[1].PrimaryKey)
+		}
+		if resp.Results[1].Snippet != "intro to <em>learning</em>" {
+			t.Errorf("Results[1].Snippet = %q", resp.Results[1].Snippet)
+		}
+	})
+
+	t.Run("highlight with custom tag and debug", func(t *testing.T) {
+		response := "OK RESULTS 1\n" +
+			"42\t<b>golang</b> rocks\n" +
+			"# DEBUG\n" +
+			"query_time: 0.42\n" +
+			"index_time: 0.1\n" +
+			"terms: 1\n" +
+			"ngrams: 2\n" +
+			"final: 1\n" +
+			"highlight: on\n" +
+			"cache: miss\n"
+		resp, err := parseSearchResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 1 {
+			t.Fatalf("len(Results) = %d, want 1", len(resp.Results))
+		}
+		if resp.Results[0].Snippet != "<b>golang</b> rocks" {
+			t.Errorf("Results[0].Snippet = %q", resp.Results[0].Snippet)
+		}
+		if resp.Debug == nil {
+			t.Fatal("Debug should not be nil")
+		}
+		if resp.Debug.QueryTimeMs != 0.42 {
+			t.Errorf("QueryTimeMs = %f, want 0.42", resp.Debug.QueryTimeMs)
+		}
+		if resp.Debug.Cache != "miss" {
+			t.Errorf("Cache = %q, want miss", resp.Debug.Cache)
+		}
+	})
+
+	t.Run("highlight with zero results", func(t *testing.T) {
+		// When total=0, no snippet lines follow; behaves like classic format.
+		resp, err := parseSearchResponse("OK RESULTS 0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.TotalCount != 0 {
+			t.Errorf("TotalCount = %d, want 0", resp.TotalCount)
+		}
+		if len(resp.Results) != 0 {
+			t.Errorf("len(Results) = %d, want 0", len(resp.Results))
+		}
+	})
+
+	t.Run("snippet containing spaces", func(t *testing.T) {
+		// Make sure we split on the first tab only; spaces inside snippets
+		// must be preserved verbatim.
+		response := "OK RESULTS 1\nfoo-1\ta b c d e <em>kw</em> f g h\n"
+		resp, err := parseSearchResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Results[0].PrimaryKey != "foo-1" {
+			t.Errorf("PrimaryKey = %q, want foo-1", resp.Results[0].PrimaryKey)
+		}
+		if resp.Results[0].Snippet != "a b c d e <em>kw</em> f g h" {
+			t.Errorf("Snippet = %q", resp.Results[0].Snippet)
+		}
+	})
+}
+
+// parseSearchResponse: defensive handling of malformed first lines.
+func TestParseSearchResponseMalformed(t *testing.T) {
+	cases := []string{
+		"OK RESULTS",     // missing count
+		"OK RESULTS abc", // non-numeric count
+		"OK RESULTS\n",   // count missing with newline
+	}
+	for _, input := range cases {
+		if _, err := parseSearchResponse(input); err == nil {
+			t.Errorf("expected error for %q", input)
+		}
+	}
+}
+
 func TestParseCountResponse(t *testing.T) {
 	t.Run("basic response", func(t *testing.T) {
 		resp, err := parseCountResponse("OK COUNT 1523")
@@ -101,6 +210,20 @@ func TestParseCountResponse(t *testing.T) {
 			t.Errorf("QueryTimeMs = %f, want 0.5", resp.Debug.QueryTimeMs)
 		}
 	})
+}
+
+func TestParseCountResponseRejectsTrailingTokens(t *testing.T) {
+	_, err := parseCountResponse("OK COUNT 12 34")
+	if _, ok := err.(*ProtocolError); !ok {
+		t.Fatalf("expected ProtocolError, got %T (%v)", err, err)
+	}
+}
+
+func TestParseCountResponseRejectsNegativeCount(t *testing.T) {
+	_, err := parseCountResponse("OK COUNT -1")
+	if _, ok := err.(*ProtocolError); !ok {
+		t.Fatalf("expected ProtocolError, got %T (%v)", err, err)
+	}
 }
 
 func TestParseGetResponse(t *testing.T) {
@@ -132,6 +255,163 @@ func TestParseGetResponse(t *testing.T) {
 			t.Errorf("len(Fields) = %d, want 0", len(resp.Fields))
 		}
 	})
+}
+
+func TestParseFacetResponse(t *testing.T) {
+	t.Run("three values", func(t *testing.T) {
+		response := "OK FACET 3\n" +
+			"tech\t42\n" +
+			"science\t18\n" +
+			"art\t7\n"
+		resp, err := parseFacetResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 3 {
+			t.Fatalf("len(Results) = %d, want 3", len(resp.Results))
+		}
+		want := []FacetValue{
+			{Value: "tech", Count: 42},
+			{Value: "science", Count: 18},
+			{Value: "art", Count: 7},
+		}
+		for i, w := range want {
+			if resp.Results[i] != w {
+				t.Errorf("Results[%d] = %+v, want %+v", i, resp.Results[i], w)
+			}
+		}
+	})
+
+	t.Run("empty result set", func(t *testing.T) {
+		resp, err := parseFacetResponse("OK FACET 0\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 0 {
+			t.Errorf("len(Results) = %d, want 0", len(resp.Results))
+		}
+	})
+
+	t.Run("with debug comments", func(t *testing.T) {
+		response := "OK FACET 1\n" +
+			"published\t100\n" +
+			"# query_time_ms: 1.23\n" +
+			"# total_docs_searched: 100\n"
+		resp, err := parseFacetResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 1 {
+			t.Fatalf("len(Results) = %d, want 1", len(resp.Results))
+		}
+		if resp.Results[0].Value != "published" || resp.Results[0].Count != 100 {
+			t.Errorf("Results[0] = %+v", resp.Results[0])
+		}
+	})
+
+	t.Run("value starting with hash is kept", func(t *testing.T) {
+		// v1.8: a facet value may legitimately start with '#'. Such a row has a
+		// tab and must not be dropped as a comment, while a tab-less '#' line
+		// (e.g. a debug comment) is still skipped.
+		response := "OK FACET 2\n" +
+			"#hashtag\t9\n" +
+			"#golang\t4\n" +
+			"# query_time_ms: 0.5\n"
+		resp, err := parseFacetResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []FacetValue{
+			{Value: "#hashtag", Count: 9},
+			{Value: "#golang", Count: 4},
+		}
+		if len(resp.Results) != len(want) {
+			t.Fatalf("len(Results) = %d, want %d (%+v)", len(resp.Results), len(want), resp.Results)
+		}
+		for i, w := range want {
+			if resp.Results[i] != w {
+				t.Errorf("Results[%d] = %+v, want %+v", i, resp.Results[i], w)
+			}
+		}
+	})
+
+	t.Run("value with spaces", func(t *testing.T) {
+		// Facet values are whitespace-tolerant; only tab separates the count.
+		response := "OK FACET 1\nmachine learning\t5\n"
+		resp, err := parseFacetResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Results[0].Value != "machine learning" {
+			t.Errorf("Value = %q, want %q", resp.Results[0].Value, "machine learning")
+		}
+		if resp.Results[0].Count != 5 {
+			t.Errorf("Count = %d, want 5", resp.Results[0].Count)
+		}
+	})
+
+	t.Run("invalid prefix", func(t *testing.T) {
+		_, err := parseFacetResponse("NOT OK")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if _, ok := err.(*ProtocolError); !ok {
+			t.Errorf("expected ProtocolError, got %T", err)
+		}
+	})
+
+	t.Run("malformed row (no tab)", func(t *testing.T) {
+		_, err := parseFacetResponse("OK FACET 1\nbroken\n")
+		if err == nil {
+			t.Fatal("expected error for missing tab")
+		}
+	})
+
+	t.Run("malformed count", func(t *testing.T) {
+		_, err := parseFacetResponse("OK FACET 1\ntech\tNaN\n")
+		if err == nil {
+			t.Fatal("expected error for non-numeric count")
+		}
+	})
+}
+
+func TestParseFacetResponseTotalCount(t *testing.T) {
+	resp, err := parseFacetResponse("OK FACET 2 42\r\nnews\t10\r\nblog\t7\r\n\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 2 {
+		t.Fatalf("got %d results, want 2", len(resp.Results))
+	}
+	if resp.TotalCount != 42 {
+		t.Errorf("TotalCount = %d, want 42", resp.TotalCount)
+	}
+}
+
+// A server that predates paginated facets sends only the page size, so the
+// best available total is that same number.
+func TestParseFacetResponseLegacyHeaderFallsBackToPageSize(t *testing.T) {
+	resp, err := parseFacetResponse("OK FACET 2\r\nnews\t10\r\nblog\t7\r\n\r\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.TotalCount != 2 {
+		t.Errorf("TotalCount = %d, want 2", resp.TotalCount)
+	}
+}
+
+func TestParseFacetResponseRejectsRowCountMismatch(t *testing.T) {
+	_, err := parseFacetResponse("OK FACET 3 3\r\nnews\t10\r\n\r\n")
+	if _, ok := err.(*ProtocolError); !ok {
+		t.Fatalf("expected ProtocolError, got %T (%v)", err, err)
+	}
+}
+
+func TestParseFacetResponseRejectsTotalBelowPageSize(t *testing.T) {
+	_, err := parseFacetResponse("OK FACET 2 1\r\nnews\t10\r\nblog\t7\r\n\r\n")
+	if _, ok := err.(*ProtocolError); !ok {
+		t.Fatalf("expected ProtocolError, got %T (%v)", err, err)
+	}
 }
 
 func TestParseInfoResponse(t *testing.T) {
@@ -181,6 +461,60 @@ tables: threads,images,keywords
 	}
 	if info.Tables[0] != "threads" {
 		t.Errorf("Tables[0] = %q, want %q", info.Tables[0], "threads")
+	}
+}
+
+func TestParseInfoResponseReadiness(t *testing.T) {
+	response := strings.Join([]string{
+		"OK INFO",
+		"",
+		"# Server",
+		"version: 1.10.0",
+		"uptime_seconds: 120",
+		"data_initialized: true",
+		"readiness: ready",
+		"",
+		"END",
+	}, "\n")
+
+	info, err := parseInfoResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.DataInitialized {
+		t.Error("DataInitialized = false, want true")
+	}
+	if info.Readiness != "ready" {
+		t.Errorf("Readiness = %q, want %q", info.Readiness, "ready")
+	}
+	if !info.Ready() {
+		t.Error("Ready() = false, want true")
+	}
+}
+
+func TestParseInfoResponseNotReady(t *testing.T) {
+	response := "OK INFO\n\n# Server\nversion: 1.10.0\ndata_initialized: false\nreadiness: not_ready\n\nEND"
+
+	info, err := parseInfoResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.DataInitialized {
+		t.Error("DataInitialized = true, want false")
+	}
+	if info.Ready() {
+		t.Error("Ready() = true, want false")
+	}
+}
+
+// A pre-v1.10 server omits both fields, so readiness is simply unknown.
+func TestParseInfoResponseLegacyServerHasNoReadiness(t *testing.T) {
+	info, err := parseInfoResponse("OK INFO\n\n# Server\nversion: 1.8.0\n\nEND")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Readiness != "" || info.DataInitialized || info.Ready() {
+		t.Errorf("legacy INFO reported readiness: %+v", info)
 	}
 }
 
@@ -283,6 +617,89 @@ END
 	}
 	if ds.ElapsedSeconds != 1.5 {
 		t.Errorf("ElapsedSeconds = %f, want 1.5", ds.ElapsedSeconds)
+	}
+}
+
+func TestParseCacheStatsFullSurface(t *testing.T) {
+	response := strings.Join([]string{
+		"OK CACHE_STATS",
+		"",
+		"# Cache",
+		"enabled: true",
+		"total_queries: 100",
+		"cache_hits: 70",
+		"cache_misses: 30",
+		"hit_rate: 0.7000",
+		"current_entries: 12",
+		"current_memory_bytes: 4096",
+		"invalidation_index_memory_bytes: 512",
+		"invalidation_queue_memory_bytes: 256",
+		"accounted_memory_bytes: 4864",
+		"evictions: 3",
+		"ttl_expirations: 2",
+		"rejection_count: 6",
+		"rejection_oversize: 1",
+		"rejection_memory_budget: 2",
+		"rejection_duplicate: 3",
+		"stale_entry_removals: 4",
+		"decompression_failures: 5",
+		"stale_lru_entries: 7",
+		"invalidations_immediate: 8",
+		"invalidations_deferred: 9",
+		"invalidations_batches: 10",
+		"avg_cache_hit_time_ms: 0.250",
+		"avg_cache_miss_time_ms: 3.500",
+		"total_time_saved_ms: 227.500",
+		"",
+		"END",
+	}, "\n")
+
+	cs, err := parseCacheStatsResponse(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cs.Enabled || cs.TotalQueries != 100 || cs.Hits != 70 || cs.Misses != 30 {
+		t.Errorf("counters = %+v", cs)
+	}
+	if cs.InvalidationIndexMemoryBytes != 512 || cs.InvalidationQueueMemoryBytes != 256 || cs.AccountedMemoryBytes != 4864 {
+		t.Errorf("memory accounting = %+v", cs)
+	}
+	if cs.TTLExpirations != 2 || cs.RejectionCount != 6 || cs.RejectionOversize != 1 ||
+		cs.RejectionMemoryBudget != 2 || cs.RejectionDuplicate != 3 {
+		t.Errorf("rejection counters = %+v", cs)
+	}
+	if cs.StaleEntryRemovals != 4 || cs.DecompressionFailures != 5 || cs.StaleLRUEntries != 7 {
+		t.Errorf("health counters = %+v", cs)
+	}
+	if cs.InvalidationsImmediate != 8 || cs.InvalidationsDeferred != 9 || cs.InvalidationsBatches != 10 {
+		t.Errorf("invalidation counters = %+v", cs)
+	}
+	if cs.AvgHitTimeMs == nil || *cs.AvgHitTimeMs != 0.25 {
+		t.Errorf("AvgHitTimeMs = %v, want 0.25", cs.AvgHitTimeMs)
+	}
+	if cs.AvgMissTimeMs == nil || *cs.AvgMissTimeMs != 3.5 {
+		t.Errorf("AvgMissTimeMs = %v, want 3.5", cs.AvgMissTimeMs)
+	}
+	if cs.TotalTimeSavedMs != 227.5 {
+		t.Errorf("TotalTimeSavedMs = %v, want 227.5", cs.TotalTimeSavedMs)
+	}
+}
+
+func TestParseCacheStatsOmittedAveragesStayNil(t *testing.T) {
+	// The server omits the averages while the matching counter is zero, which
+	// must stay distinguishable from a measured 0.
+	cs, err := parseCacheStatsResponse("OK CACHE_STATS\n\nenabled: false\ncache_hits: 0\n\nEND")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cs.AvgHitTimeMs != nil || cs.AvgMissTimeMs != nil {
+		t.Errorf("averages = %v / %v, want nil", cs.AvgHitTimeMs, cs.AvgMissTimeMs)
+	}
+}
+
+func TestParseCacheStatsResponseInvalid(t *testing.T) {
+	if _, err := parseCacheStatsResponse("NOPE"); err == nil {
+		t.Error("expected error for bad prefix")
 	}
 }
 

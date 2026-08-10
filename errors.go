@@ -81,12 +81,26 @@ func (e *ValidationError) Error() string {
 
 // ServerError is an error returned when the server responds with ERROR.
 type ServerError struct {
+	// Message is the human-readable part of the frame, with the numeric code
+	// prefix removed.
 	Message string
+
+	// Code is the numeric error code carried by the frame (MygramDB >= v1.10).
+	// It is ErrCodeNone for an uncoded frame from an older server.
+	Code ErrorCode
 }
 
 func (e *ServerError) Error() string {
+	if e.Code != ErrCodeNone {
+		return fmt.Sprintf("server error (code %d): %s", uint16(e.Code), e.Message)
+	}
 	return fmt.Sprintf("server error: %s", e.Message)
 }
+
+// Retryable reports whether the server rejected the command with a transient
+// condition that did not execute it, so a retry after a backoff is safe. It is
+// always false for an uncoded frame, whose message is not a reliable signal.
+func (e *ServerError) Retryable() bool { return e.Code.Retryable() }
 
 // CircuitOpenError is returned by a Pool whose circuit breaker is open (or
 // half-open with a trial already in flight). It is raised without touching the

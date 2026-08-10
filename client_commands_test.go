@@ -1,16 +1,78 @@
 package mygram
 
 import (
+	"context"
+	"errors"
+	"net"
 	"strings"
 	"testing"
 )
 
-// Tests for pre-v1.6 commands that previously had 0% coverage. Response
-// shapes below are drawn from the MygramDB server handlers under
-// src/server/handlers/ (cache_handler.cpp, dump_handler.cpp,
-// debug_handler.cpp, response_formatter.cpp).
+// Wire form and response handling of the administrative commands: INFO,
+// CONFIG, REPLICATION, SYNC, DUMP, CACHE, OPTIMIZE, SET and SHOW VARIABLES
+// (client.go). Response shapes are drawn from the MygramDB server handlers
+// under src/server/handlers/.
 
-// --- REPLICATION -------------------------------------------------------------
+func TestClientInfo(t *testing.T) {
+	addr, cleanup := mockServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+		_, _ = conn.Read(buf)
+
+		response := "OK INFO\n\n# Server\nversion: 2.0.0\nuptime_seconds: 100\n\n# Index\ntotal_documents: 5000\n\n# Tables\ntables: threads,images\n\n"
+		_, _ = conn.Write([]byte(response))
+	})
+	defer cleanup()
+
+	c := NewClient(addr)
+	defer func() { _ = c.Close() }()
+
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := c.Info()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Version != "2.0.0" {
+		t.Errorf("Version = %q, want %q", info.Version, "2.0.0")
+	}
+	if info.DocCount != 5000 {
+		t.Errorf("DocCount = %d, want 5000", info.DocCount)
+	}
+}
+
+func TestGetConfig(t *testing.T) {
+	// CONFIG multi-line response. Client returns the raw (trimmed) payload.
+	response := "OK CONFIG\r\n" +
+		"  mysql:\r\n" +
+		"    host: 127.0.0.1\r\n" +
+		"  tables: 1\r\n" +
+		"\r\n"
+	srv, addr, cleanup := newRecordingServer(t, response)
+	defer cleanup()
+
+	c := NewClient(addr)
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := c.GetConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "OK CONFIG") {
+		t.Errorf("GetConfig = %q, want prefix %q", got, "OK CONFIG")
+	}
+	if !strings.Contains(got, "host: 127.0.0.1") {
+		t.Errorf("GetConfig missing host line: %q", got)
+	}
+	if cmd := srv.lastCommand(); cmd != "CONFIG" {
+		t.Errorf("command = %q, want %q", cmd, "CONFIG")
+	}
+}
 
 func TestGetReplicationStatus(t *testing.T) {
 	response := "OK REPLICATION\r\n" +
@@ -99,8 +161,6 @@ func TestStartReplicationServerError(t *testing.T) {
 	}
 }
 
-// --- DEBUG -------------------------------------------------------------------
-
 func TestEnableDebug(t *testing.T) {
 	srv, addr, cleanup := newRecordingServer(t, "OK DEBUG_ON\r\n")
 	defer cleanup()
@@ -137,40 +197,91 @@ func TestDisableDebug(t *testing.T) {
 	}
 }
 
-// --- CONFIG ------------------------------------------------------------------
-
-func TestGetConfig(t *testing.T) {
-	// CONFIG multi-line response. Client returns the raw (trimmed) payload.
-	response := "OK CONFIG\r\n" +
-		"  mysql:\r\n" +
-		"    host: 127.0.0.1\r\n" +
-		"  tables: 1\r\n" +
-		"\r\n"
-	srv, addr, cleanup := newRecordingServer(t, response)
-	defer cleanup()
-
-	c := NewClient(addr)
-	defer func() { _ = c.Close() }()
-	if err := c.Connect(); err != nil {
-		t.Fatal(err)
+func TestSetVariableCommand(t *testing.T) {
+	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	if err := c.SetVariable("logging.level", "debug value"); err != nil {
+		t.Fatalf("SetVariable: %v", err)
 	}
-
-	got, err := c.GetConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(got, "OK CONFIG") {
-		t.Errorf("GetConfig = %q, want prefix %q", got, "OK CONFIG")
-	}
-	if !strings.Contains(got, "host: 127.0.0.1") {
-		t.Errorf("GetConfig missing host line: %q", got)
-	}
-	if cmd := srv.lastCommand(); cmd != "CONFIG" {
-		t.Errorf("command = %q, want %q", cmd, "CONFIG")
+	cmd := srv.lastCommand()
+	want := `SET logging.level = "debug value"`
+	if cmd != want {
+		t.Errorf("command = %q, want %q", cmd, want)
 	}
 }
 
-// --- DUMP --------------------------------------------------------------------
+func TestSetVariableInvalidName(t *testing.T) {
+	c := NewClient("127.0.0.1:1")
+	if err := c.SetVariable("bad name", "x"); err == nil {
+		t.Fatal("expected error for whitespace in variable name")
+	}
+}
+
+func TestShowVariablesNoPattern(t *testing.T) {
+	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	if _, err := c.ShowVariables(""); err != nil {
+		t.Fatalf("ShowVariables: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SHOW VARIABLES" {
+		t.Errorf("command = %q, want %q", cmd, "SHOW VARIABLES")
+	}
+}
+
+func TestShowVariablesWithPattern(t *testing.T) {
+	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	if _, err := c.ShowVariables("logging%"); err != nil {
+		t.Fatalf("ShowVariables: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SHOW VARIABLES LIKE logging%" {
+		t.Errorf("command = %q, want %q", cmd, "SHOW VARIABLES LIKE logging%")
+	}
+}
+
+func TestSyncCommand(t *testing.T) {
+	c, srv := connectRecording(t, "OK SYNC STARTED articles\r\n")
+	if _, err := c.Sync("articles"); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SYNC articles" {
+		t.Errorf("command = %q, want %q", cmd, "SYNC articles")
+	}
+}
+
+func TestSyncStopAll(t *testing.T) {
+	c, srv := connectRecording(t, "OK\r\n")
+	if _, err := c.SyncStop(""); err != nil {
+		t.Fatalf("SyncStop: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SYNC STOP" {
+		t.Errorf("command = %q, want %q", cmd, "SYNC STOP")
+	}
+}
+
+func TestSyncStopTable(t *testing.T) {
+	c, srv := connectRecording(t, "OK\r\n")
+	if _, err := c.SyncStop("articles"); err != nil {
+		t.Fatalf("SyncStop: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SYNC STOP articles" {
+		t.Errorf("command = %q, want %q", cmd, "SYNC STOP articles")
+	}
+}
+
+func TestSyncStatusCommand(t *testing.T) {
+	// SYNC STATUS is a multi-line, END-terminated response that ends with an
+	// extra blank line (END\r\n\r\n); the framing must capture it whole.
+	resp := "OK SYNC_STATUS\r\narticles running 50%\r\nEND\r\n\r\n"
+	c, srv := connectRecording(t, resp)
+	got, err := c.SyncStatus()
+	if err != nil {
+		t.Fatalf("SyncStatus: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "SYNC STATUS" {
+		t.Errorf("command = %q, want %q", cmd, "SYNC STATUS")
+	}
+	if !strings.Contains(got, "articles running 50%") {
+		t.Errorf("response missing status line; got %q", got)
+	}
+}
 
 func TestDumpSaveWithFilepath(t *testing.T) {
 	srv, addr, cleanup := newRecordingServer(t, "OK SAVED /tmp/dump.bin\r\n")
@@ -209,6 +320,131 @@ func TestDumpSaveNoFilepath(t *testing.T) {
 	}
 	if cmd := srv.lastCommand(); cmd != "DUMP SAVE" {
 		t.Errorf("command = %q, want %q", cmd, "DUMP SAVE")
+	}
+}
+
+func TestDumpSaveQuotesFilepathWithSpace(t *testing.T) {
+	c, srv := connectRecording(t, "OK DUMP_STARTED /tmp/my dump.bin\r\n")
+	if _, err := c.DumpSave("/tmp/my dump.bin"); err != nil {
+		t.Fatalf("DumpSave: %v", err)
+	}
+	cmd := srv.lastCommand()
+	want := `DUMP SAVE "/tmp/my dump.bin"`
+	if cmd != want {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+}
+
+func TestDumpSavePlainFilepathUnquoted(t *testing.T) {
+	c, srv := connectRecording(t, "OK DUMP_STARTED /tmp/dump.bin\r\n")
+	if _, err := c.DumpSave("/tmp/dump.bin"); err != nil {
+		t.Fatalf("DumpSave: %v", err)
+	}
+	if cmd := srv.lastCommand(); cmd != "DUMP SAVE /tmp/dump.bin" {
+		t.Errorf("command = %q, want %q", cmd, "DUMP SAVE /tmp/dump.bin")
+	}
+}
+
+func TestDumpSaveAndWaitReturnsInlineSavePath(t *testing.T) {
+	_, addr := newScriptedServer(t, "", "OK SAVED /var/lib/mygramdb/default.dmp\r\n")
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	path, err := c.DumpSaveAndWaitContext(testContext(t), "")
+	if err != nil {
+		t.Fatalf("DumpSaveAndWait: %v", err)
+	}
+	if path != "/var/lib/mygramdb/default.dmp" {
+		t.Errorf("path = %q", path)
+	}
+}
+
+func TestDumpSaveAndWaitPollsUntilCompleted(t *testing.T) {
+	srv, addr := newScriptedServer(t, "",
+		"OK DUMP_STARTED /tmp/started.dmp\r\n",
+		"OK DUMP_STATUS\r\nsave_in_progress: true\r\nstatus: RUNNING\r\nEND\r\n",
+		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nresult_filepath: /tmp/final.dmp\r\nEND\r\n",
+	)
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	path, err := c.DumpSaveAndWaitContext(testContext(t), "/tmp/started.dmp")
+	if err != nil {
+		t.Fatalf("DumpSaveAndWait: %v", err)
+	}
+	if path != "/tmp/final.dmp" {
+		t.Errorf("path = %q, want /tmp/final.dmp", path)
+	}
+	got := srv.recorded()
+	want := []string{"DUMP SAVE /tmp/started.dmp", "DUMP STATUS", "DUMP STATUS"}
+	if len(got) != len(want) {
+		t.Fatalf("commands = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("command[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDumpSaveAndWaitFallsBackToStartedPath(t *testing.T) {
+	_, addr := newScriptedServer(t, "",
+		"OK DUMP_STARTED /tmp/started.dmp\r\n",
+		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nEND\r\n",
+	)
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	path, err := c.DumpSaveAndWaitContext(testContext(t), "/tmp/started.dmp")
+	if err != nil {
+		t.Fatalf("DumpSaveAndWait: %v", err)
+	}
+	if path != "/tmp/started.dmp" {
+		t.Errorf("path = %q, want the started path", path)
+	}
+}
+
+func TestDumpSaveAndWaitSurfacesFailure(t *testing.T) {
+	_, addr := newScriptedServer(t, "",
+		"OK DUMP_STARTED /tmp/started.dmp\r\n",
+		"OK DUMP_STATUS\r\nstatus: FAILED\r\nerror: disk full\r\nEND\r\n",
+	)
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	_, err := c.DumpSaveAndWaitContext(testContext(t), "/tmp/started.dmp")
+	var se *ServerError
+	if !errors.As(err, &se) {
+		t.Fatalf("error = %v (%T), want *ServerError", err, err)
+	}
+	if se.Message != "disk full" {
+		t.Errorf("message = %q, want %q", se.Message, "disk full")
+	}
+}
+
+func TestDumpSaveAndWaitTimesOutOnItsOwnBudget(t *testing.T) {
+	_, addr := newScriptedServer(t,
+		"OK DUMP_STATUS\r\nstatus: RUNNING\r\nEND\r\n",
+		"OK DUMP_STARTED /tmp/started.dmp\r\n",
+	)
+	cfg := DefaultConfig()
+	cfg.DumpSaveTimeoutMs = 300
+	c := connectScripted(t, cfg, addr)
+
+	_, err := c.DumpSaveAndWaitContext(context.Background(), "/tmp/started.dmp")
+	var te *TimeoutError
+	if !errors.As(err, &te) {
+		t.Fatalf("error = %v (%T), want *TimeoutError", err, err)
+	}
+	if !strings.Contains(err.Error(), "DUMP SAVE") {
+		t.Errorf("error should name the operation, got: %v", err)
+	}
+}
+
+func TestDumpSaveAndWaitRejectsUnexpectedAcknowledgement(t *testing.T) {
+	_, addr := newScriptedServer(t, "", "OK\r\n")
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	_, err := c.DumpSaveAndWaitContext(testContext(t), "")
+	var pe *ProtocolError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want *ProtocolError", err, err)
 	}
 }
 
@@ -350,8 +586,6 @@ func TestDumpInfo(t *testing.T) {
 	}
 }
 
-// --- CACHE -------------------------------------------------------------------
-
 func TestCacheStats(t *testing.T) {
 	// Server emits `OK CACHE_STATS\r\n\r\n` followed by key: value lines.
 	response := "OK CACHE_STATS\r\n\r\n" +
@@ -420,12 +654,6 @@ func TestCacheStatsDisabled(t *testing.T) {
 	}
 	if cs.Enabled {
 		t.Error("Enabled should be false")
-	}
-}
-
-func TestParseCacheStatsResponseInvalid(t *testing.T) {
-	if _, err := parseCacheStatsResponse("NOPE"); err == nil {
-		t.Error("expected error for bad prefix")
 	}
 }
 
@@ -501,8 +729,6 @@ func TestCacheDisable(t *testing.T) {
 	}
 }
 
-// --- OPTIMIZE ----------------------------------------------------------------
-
 func TestOptimizeAllTables(t *testing.T) {
 	srv, addr, cleanup := newRecordingServer(t, "OK OPTIMIZED terms=100 delta=10 roaring=90\r\n")
 	defer cleanup()
@@ -536,5 +762,24 @@ func TestOptimizeSingleTable(t *testing.T) {
 	}
 	if cmd := srv.lastCommand(); cmd != "OPTIMIZE articles" {
 		t.Errorf("command = %q", cmd)
+	}
+}
+
+func TestAdminCommandsValidateTableName(t *testing.T) {
+	c := NewClient("127.0.0.1:1")
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"OPTIMIZE", func() error { return c.Optimize("articles LIMIT 1") }},
+		{"CACHE CLEAR", func() error { return c.CacheClear(`articles"`) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var verr *ValidationError
+			if err := tc.call(); !errors.As(err, &verr) {
+				t.Fatalf("error = %v (%T), want *ValidationError", err, err)
+			}
+		})
 	}
 }

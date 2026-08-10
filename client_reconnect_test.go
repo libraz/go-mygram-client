@@ -1,21 +1,12 @@
 package mygram
 
 import (
-	"bufio"
-	"net"
 	"strings"
 	"testing"
-	"time"
 )
 
-func clientFor(t *testing.T, addr string, cfg ClientConfig) *Client {
-	t.Helper()
-	cfg.Host, cfg.Port = splitHostPort(t, addr)
-	cfg.MaxQueryLength = 0
-	c := NewClientWithConfig(cfg)
-	t.Cleanup(func() { _ = c.Close() })
-	return c
-}
+// Auto-reconnect (client.go): a command is resent only when the socket was
+// found dead before anything was written.
 
 func TestClientAutoReconnectResendsWhenDeadBeforeSend(t *testing.T) {
 	addr, accepts, cleanup := poolMockServer(t, echoSearchServer)
@@ -54,17 +45,6 @@ func TestClientWithoutAutoReconnectFailsWhenDead(t *testing.T) {
 		t.Fatalf("err = %T (%v), want *ConnectionError", err, err)
 	}
 	waitAccepts(t, accepts, 1) // no reconnect without AutoReconnect
-}
-
-// holdServer reads one request and then holds the connection open without
-// replying, so the client's read deadline elapses (a read-phase failure).
-func holdServer(idx int, conn net.Conn) {
-	defer func() { _ = conn.Close() }()
-	br := bufio.NewReader(conn)
-	if _, err := br.ReadString('\n'); err != nil {
-		return
-	}
-	time.Sleep(time.Second) // outlast the client's command timeout
 }
 
 func TestClientAutoReconnectDoesNotResendAfterSend(t *testing.T) {
