@@ -11,10 +11,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-COMPOSE=(docker compose -f "${SCRIPT_DIR}/docker-compose.yml")
+# -p pins the project even if the compose file is ever invoked from a context
+# that overrides it, so teardown can never reach an unrelated stack.
+COMPOSE=(docker compose -p go-mygram-e2e -f "${SCRIPT_DIR}/docker-compose.yml")
 
 MYGRAM_PORT="${MYGRAM_PORT:-11016}"
 MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT:-18080}"
+# Must match the compose stack; administrative commands need AUTH from v1.10.
+MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN:-e2e_admin_token}"
 
 cleanup() {
   if [ "${KEEP_UP:-0}" = "1" ]; then
@@ -27,8 +31,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.8.0})"
-MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" "${COMPOSE[@]}" up -d --wait
+echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.10.0})"
+MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" \
+  MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN}" "${COMPOSE[@]}" up -d --wait
 
 # `--wait` already blocks on the healthcheck (/health/ready), which only turns
 # green after the initial snapshot finishes loading. Do a final explicit poll
@@ -50,4 +55,5 @@ done
 echo "==> Running e2e suite"
 cd "${REPO_ROOT}"
 MYGRAM_E2E_SEEDED=1 MYGRAM_HOST=127.0.0.1 MYGRAM_PORT="${MYGRAM_PORT}" \
+  MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN}" \
   go test -tags=e2e -count=1 -v ./...

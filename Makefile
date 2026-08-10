@@ -10,6 +10,8 @@ test-race:
 
 # Run e2e tests against a live MygramDB server.
 # Override the endpoint via MYGRAM_HOST / MYGRAM_PORT (defaults: 127.0.0.1:11016).
+# A server with api.admin_token set (mandatory from v1.10 on a non-loopback
+# bind) needs MYGRAM_ADMIN_TOKEN so administrative commands can AUTH.
 # To skip the dump or replication round-trip, set
 #   MYGRAM_E2E_SKIP_DUMP=1 / MYGRAM_E2E_SKIP_REPLICATION=1
 test-e2e:
@@ -17,7 +19,8 @@ test-e2e:
 
 # Spin up a throwaway MySQL + MygramDB stack (docker compose), run the e2e
 # suite against it with the deterministic seed, then tear it down.
-# Knobs: MYGRAMDB_VERSION, MYSQL_VERSION, MYGRAM_PORT, MYGRAM_HTTP_PORT, KEEP_UP.
+# Knobs: MYGRAMDB_VERSION, MYSQL_VERSION, MYGRAM_PORT, MYGRAM_HTTP_PORT,
+#        MYGRAM_ADMIN_TOKEN, KEEP_UP.
 test-e2e-docker:
 	bash e2e/docker/run-e2e.sh
 

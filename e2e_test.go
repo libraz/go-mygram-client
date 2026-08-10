@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -45,6 +46,15 @@ func e2eAddr() (string, int) {
 	return host, port
 }
 
+// e2eAdminToken returns the administrative token for the server under test.
+// A server that sets api.admin_token (mandatory from v1.10 on a non-loopback
+// bind) gates DUMP, SYNC, REPLICATION, CACHE and CONFIG behind AUTH, so the
+// docker harness passes its token through MYGRAM_ADMIN_TOKEN. An empty value
+// sends no AUTH, which is what a loopback-only server without a token wants.
+func e2eAdminToken() string {
+	return os.Getenv("MYGRAM_ADMIN_TOKEN")
+}
+
 // e2eServerAvailable probes the configured endpoint by issuing INFO.
 // Cached so repeated tests pay only a single round-trip.
 var (
@@ -62,6 +72,7 @@ func ensureE2EServer(tb testing.TB) {
 			TimeoutMs:      2000,
 			RecvBufferSize: 65536,
 			MaxQueryLength: 128,
+			AdminToken:     e2eAdminToken(),
 		})
 		if err := c.Connect(); err == nil {
 			if _, err := c.Info(); err == nil {
@@ -88,6 +99,7 @@ func newE2EClient(t *testing.T) *Client {
 		TimeoutMs:      5000,
 		RecvBufferSize: 65536,
 		MaxQueryLength: 0,
+		AdminToken:     e2eAdminToken(),
 	})
 	if err := c.Connect(); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -141,7 +153,7 @@ func TestE2EConnect(t *testing.T) {
 func TestE2EConnectContext(t *testing.T) {
 	ensureE2EServer(t)
 	host, port := e2eAddr()
-	c := NewClientWithConfig(ClientConfig{Host: host, Port: port, TimeoutMs: 5000})
+	c := NewClientWithConfig(ClientConfig{Host: host, Port: port, TimeoutMs: 5000, AdminToken: e2eAdminToken()})
 	t.Cleanup(func() { _ = c.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -171,6 +183,20 @@ func TestE2EInfo(t *testing.T) {
 	}
 	if info.Tables == nil {
 		t.Error("Tables = nil, want non-nil slice")
+	}
+	// Readiness arrived in v1.10; an older server omits it, so only the
+	// vocabulary is asserted. A server answering INFO with tables loaded is
+	// serving, so "ready" is the expected verdict where the field exists.
+	switch info.Readiness {
+	case "":
+	case "ready":
+		if !info.Ready() {
+			t.Error("Ready() = false for readiness 'ready'")
+		}
+	case "not_ready":
+		t.Errorf("server reports readiness %q while answering INFO", info.Readiness)
+	default:
+		t.Errorf("unexpected readiness %q", info.Readiness)
 	}
 }
 
@@ -480,6 +506,57 @@ func TestE2ECacheStats(t *testing.T) {
 	}
 	if st.Hits < 0 || st.Misses < 0 {
 		t.Errorf("negative cache counters: %+v", st)
+	}
+	if st.TotalQueries != st.Hits+st.Misses {
+		t.Errorf("total_queries = %d, want hits+misses = %d", st.TotalQueries, st.Hits+st.Misses)
+	}
+	// The accounted total covers the payloads plus both invalidation structures,
+	// so it can never be the smaller number.
+	if st.AccountedMemoryBytes < st.MemoryBytes {
+		t.Errorf("accounted_memory_bytes (%d) < current_memory_bytes (%d)", st.AccountedMemoryBytes, st.MemoryBytes)
+	}
+	// The four rejection counters are independent reasons, so each is only
+	// required to be non-negative and parsed rather than left at zero by a
+	// key the parser does not know.
+	for name, v := range map[string]int{
+		"rejection_count":         st.RejectionCount,
+		"rejection_oversize":      st.RejectionOversize,
+		"rejection_memory_budget": st.RejectionMemoryBudget,
+		"rejection_duplicate":     st.RejectionDuplicate,
+		"invalidations_immediate": st.InvalidationsImmediate,
+		"invalidations_deferred":  st.InvalidationsDeferred,
+		"invalidations_batches":   st.InvalidationsBatches,
+	} {
+		if v < 0 {
+			t.Errorf("%s = %d, want >= 0", name, v)
+		}
+	}
+}
+
+func TestE2EDumpSaveAndWait(t *testing.T) {
+	if os.Getenv("MYGRAM_E2E_SKIP_DUMP") == "1" {
+		t.Skip("MYGRAM_E2E_SKIP_DUMP=1")
+	}
+	c := newE2EClient(t)
+
+	name := fmt.Sprintf("e2e_wait_%d.dump", time.Now().UnixNano())
+	path, err := c.DumpSaveAndWait(name)
+	if err != nil {
+		if isProtocolError(err) {
+			t.Skipf("DUMP SAVE rejected by server (likely disabled or dump_dir unwritable): %v", err)
+		}
+		t.Fatalf("DumpSaveAndWait: %v", err)
+	}
+	if path == "" {
+		t.Fatal("DumpSaveAndWait returned an empty path")
+	}
+	// The wait resolved the dump, so nothing may still be running behind it.
+	st, err := c.DumpStatus()
+	if err != nil {
+		t.Fatalf("DumpStatus: %v", err)
+	}
+	if st.SaveInProgress {
+		t.Errorf("DumpSaveAndWait returned %q while a save is still in progress: %+v", path, st)
 	}
 }
 
@@ -868,6 +945,125 @@ func TestE2ESeeded(t *testing.T) {
 		if counts["science"] != 2 {
 			t.Errorf("facet science = %d, want 2", counts["science"])
 		}
+	})
+
+	t.Run("facet pagination reports the distinct total", func(t *testing.T) {
+		full, err := c.Facet(table, "category", FacetOptions{})
+		if err != nil {
+			t.Fatalf("Facet: %v", err)
+		}
+		if full.TotalCount != int64(len(full.Results)) {
+			t.Errorf("unpaginated TotalCount = %d, want %d", full.TotalCount, len(full.Results))
+		}
+		if full.TotalCount < 2 {
+			t.Fatalf("seed should expose at least two categories, got %d", full.TotalCount)
+		}
+
+		page, err := c.Facet(table, "category", FacetOptions{Limit: 1, Offset: 1})
+		if err != nil {
+			t.Fatalf("paged Facet: %v", err)
+		}
+		if len(page.Results) != 1 {
+			t.Errorf("page holds %d values, want 1", len(page.Results))
+		}
+		if page.TotalCount != full.TotalCount {
+			t.Errorf("paged TotalCount = %d, want %d", page.TotalCount, full.TotalCount)
+		}
+		if len(full.Results) > 1 && page.Results[0].Value != full.Results[1].Value {
+			t.Errorf("OFFSET 1 returned %q, want %q", page.Results[0].Value, full.Results[1].Value)
+		}
+	})
+
+	t.Run("primary key ordering", func(t *testing.T) {
+		// A boolean expression selects three visible rows whose primary keys
+		// are 2, 3 and 4, so the two orderings are exact reversals.
+		const expr = "ruby OR python OR golang"
+		order := func(sort PrimaryKeySort) []string {
+			t.Helper()
+			resp, err := c.Search(table, expr, SearchOptions{
+				QueryMode:      QueryBoolean,
+				SortPrimaryKey: sort,
+				Limit:          10,
+			})
+			if err != nil {
+				t.Fatalf("Search: %v", err)
+			}
+			out := make([]string, 0, len(resp.Results))
+			for _, r := range resp.Results {
+				out = append(out, r.PrimaryKey)
+			}
+			return out
+		}
+
+		asc := order(PrimaryKeySortAsc)
+		if !reflect.DeepEqual(asc, []string{"2", "3", "4"}) {
+			t.Errorf("ascending order = %v, want [2 3 4]", asc)
+		}
+		desc := order(PrimaryKeySortDesc)
+		if !reflect.DeepEqual(desc, []string{"4", "3", "2"}) {
+			t.Errorf("descending order = %v, want [4 3 2]", desc)
+		}
+		// Omitting the clause leaves the server on its own default, which is
+		// the same descending order the explicit form asks for.
+		if def := order(PrimaryKeySortDefault); !reflect.DeepEqual(def, desc) {
+			t.Errorf("default order = %v, want the descending order %v", def, desc)
+		}
+	})
+
+	t.Run("comparison filters bound status", func(t *testing.T) {
+		// Exactly one visible row carries the ASCII text "learning": id 3
+		// ("python machine learning basics", status 2). id 6 has the same words
+		// but enabled = 0, and id 5 is Japanese. Each operator is checked on
+		// both sides of that known value.
+		cases := []struct {
+			name  string
+			op    FilterOp
+			value string
+			want  int
+		}{
+			{"equal matches", FilterEqual, "2", 1},
+			{"equal excludes", FilterEqual, "1", 0},
+			{"not equal excludes", FilterNotEqual, "2", 0},
+			{"not equal matches", FilterNotEqual, "1", 1},
+			{"greater than excludes", FilterGreaterThan, "2", 0},
+			{"greater than matches", FilterGreaterThan, "1", 1},
+			{"greater or equal matches", FilterGreaterThanOrEqual, "2", 1},
+			{"greater or equal excludes", FilterGreaterThanOrEqual, "3", 0},
+			{"less than excludes", FilterLessThan, "2", 0},
+			{"less than matches", FilterLessThan, "3", 1},
+			{"less or equal matches", FilterLessThanOrEqual, "2", 1},
+			{"less or equal excludes", FilterLessThanOrEqual, "1", 0},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				resp, err := c.Count(table, "learning", CountOptions{
+					FilterConditions: []FilterCondition{{Key: "status", Op: tc.op, Value: tc.value}},
+				})
+				if err != nil {
+					t.Fatalf("Count with comparison filter: %v", err)
+				}
+				if resp.Count != tc.want {
+					t.Errorf("Count = %d, want %d", resp.Count, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("boolean query mode combines with a sort", func(t *testing.T) {
+		resp, err := c.Search(table, "ruby OR python", SearchOptions{
+			QueryMode:  QueryBoolean,
+			SortColumn: "id",
+			SortDesc:   true,
+			Limit:      10,
+		})
+		if err != nil {
+			t.Fatalf("boolean Search: %v", err)
+		}
+		got := make(map[string]bool, len(resp.Results))
+		for _, r := range resp.Results {
+			got[r.PrimaryKey] = true
+		}
+		assertPKSet(t, got, "2", "3")
 	})
 
 	t.Run("searchWithHighlights wraps snippet", func(t *testing.T) {

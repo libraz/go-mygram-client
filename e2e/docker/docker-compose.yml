@@ -9,7 +9,14 @@
 #   MYGRAM_E2E_SEEDED=1 go test -tags=e2e -count=1 ./...
 #   docker compose -f e2e/docker/docker-compose.yml down -v
 #
-# Override the server version with MYGRAMDB_VERSION (defaults to the v1.8 line).
+# Override the server version with MYGRAMDB_VERSION (defaults to the v1.10
+# line) and the administrative token with MYGRAM_ADMIN_TOKEN.
+
+# The project name is declared here rather than inferred from the directory
+# name, which would be "docker" — a name any other stack in a directory called
+# `docker` also claims. Without it, `up` adopts that stack's `mysql` service and
+# `down -v` tears the whole thing down.
+name: go-mygram-e2e
 
 services:
   mysql:
@@ -41,7 +48,7 @@ services:
       start_period: 30s
 
   mygramdb:
-    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.8.0}
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.0}
     container_name: mygram_e2e_server
     depends_on:
       mysql:
@@ -49,6 +56,12 @@ services:
     environment:
       # Use the mounted config verbatim instead of the image's env-based generator.
       SKIP_CONFIG_GEN: "true"
+      # The image requires a replication password from v1.10 rather than
+      # substituting a placeholder that would only surface later as an error.
+      MYSQL_PASSWORD: test_password
+      # Overrides api.admin_token in the mounted config, so the token lives in
+      # one place for both the server and the test run.
+      MYGRAM_API_ADMIN_TOKEN: ${MYGRAM_ADMIN_TOKEN:-e2e_admin_token}
     command: ["mygramdb", "-c", "/etc/mygramdb/config.yaml"]
     volumes:
       - ./mygramdb.yaml:/etc/mygramdb/config.yaml:ro
