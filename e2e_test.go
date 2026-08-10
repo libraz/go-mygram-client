@@ -84,6 +84,14 @@ func ensureE2EServer(tb testing.TB) {
 	}
 	if !e2eAvailable {
 		host, port := e2eAddr()
+		// Against an arbitrary developer machine an absent server is a reason
+		// to skip. Under the docker harness it is a failure: that harness
+		// booted a server and waited for it, so a client that cannot reach it
+		// is a client bug — and skipping every test would exit 0 and read as a
+		// pass.
+		if os.Getenv("MYGRAM_E2E_SEEDED") == "1" {
+			tb.Fatalf("mygramdb server not reachable at %s:%d although the docker harness started one", host, port)
+		}
 		tb.Skipf("mygramdb server not reachable at %s:%d (set MYGRAM_HOST/MYGRAM_PORT or start the server)", host, port)
 	}
 }
@@ -198,6 +206,12 @@ func TestE2EInfo(t *testing.T) {
 	default:
 		t.Errorf("unexpected readiness %q", info.Readiness)
 	}
+	// DataInitialized arrived with readiness, so it is only asserted where the
+	// server reports the pair. A server that answers INFO with a ready verdict
+	// has finished building its initial state by definition.
+	if info.Readiness == "ready" && !info.DataInitialized {
+		t.Error("DataInitialized = false while readiness is 'ready'")
+	}
 }
 
 func TestE2EGetConfig(t *testing.T) {
@@ -224,6 +238,178 @@ func TestE2EReplicationStatus(t *testing.T) {
 	// response; do not require non-zero values.
 	if st.ProcessedEvents < 0 || st.QueueSize < 0 {
 		t.Errorf("negative replication counters: %+v", st)
+	}
+	// The diagnostics fields arrived in v1.10; an older server omits them and
+	// leaves them zero-valued, so only their internal consistency is asserted.
+	if st.CRCErrors < 0 {
+		t.Errorf("CRCErrors = %d, want >= 0", st.CRCErrors)
+	}
+	if st.State != "" && st.Running != (st.State == "running") {
+		t.Errorf("Running = %v contradicts State %q", st.Running, st.State)
+	}
+	// A stopped-on-error reader is the one case that carries a code, so a code
+	// without a failure state would mean the two were read from different
+	// fields.
+	if st.LastErrorCode != ErrCodeNone && st.Running {
+		t.Errorf("LastErrorCode = %d while replication is running", st.LastErrorCode)
+	}
+	// -1 is the server's "no event applied yet" sentinel, which is the normal
+	// state of a freshly started server; any other negative value would mean
+	// the lag was read from the wrong field.
+	switch {
+	case st.LastAppliedUnixtime == 0:
+		if st.SecondsSinceLastApplied != 0 && st.SecondsSinceLastApplied != -1 {
+			t.Errorf("SecondsSinceLastApplied = %d with no applied event, want 0 or -1",
+				st.SecondsSinceLastApplied)
+		}
+	case st.SecondsSinceLastApplied < 0:
+		t.Errorf("SecondsSinceLastApplied = %d after applying an event, want >= 0",
+			st.SecondsSinceLastApplied)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// administrative authentication (MygramDB >= v1.10)
+//
+// Only meaningful when the server under test configures api.admin_token; one
+// started without it leaves the administrative commands ungated, so there is
+// nothing to observe.
+// -----------------------------------------------------------------------------
+
+// newUnauthenticatedE2EClient connects deliberately without a token, to observe
+// how the server gates a command from an unauthenticated connection.
+func newUnauthenticatedE2EClient(t *testing.T) *Client {
+	t.Helper()
+	ensureE2EServer(t)
+	host, port := e2eAddr()
+	c := NewClientWithConfig(ClientConfig{Host: host, Port: port, TimeoutMs: 5000})
+	if err := c.Connect(); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func requireAdminToken(t *testing.T) string {
+	t.Helper()
+	token := e2eAdminToken()
+	if token == "" {
+		t.Skip("MYGRAM_ADMIN_TOKEN is unset; the server under test does not gate administrative commands")
+	}
+	return token
+}
+
+func TestE2EAuthSearchNeedsNoToken(t *testing.T) {
+	requireAdminToken(t)
+	table := firstTable(t, newE2EClient(t))
+	c := newUnauthenticatedE2EClient(t)
+	if _, err := c.Search(table, "python", SearchOptions{Limit: 1}); err != nil {
+		t.Fatalf("Search on an unauthenticated connection: %v", err)
+	}
+}
+
+func TestE2EAuthAdminCommandRefusedWithoutToken(t *testing.T) {
+	requireAdminToken(t)
+	c := newUnauthenticatedE2EClient(t)
+
+	_, err := c.CacheStats()
+	if err == nil {
+		t.Fatal("CACHE STATS succeeded on an unauthenticated connection")
+	}
+	var se *ServerError
+	if !errors.As(err, &se) {
+		t.Fatalf("error = %T (%v), want *ServerError", err, err)
+	}
+	if se.Code != ErrCodePermissionDenied {
+		t.Errorf("Code = %d, want %d (permission denied)", se.Code, ErrCodePermissionDenied)
+	}
+	if se.Retryable() {
+		t.Error("Retryable() = true for a missing authorization")
+	}
+}
+
+func TestE2EAuthUpgradesAnOpenConnection(t *testing.T) {
+	token := requireAdminToken(t)
+	c := newUnauthenticatedE2EClient(t)
+
+	if err := c.Authenticate(token); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if _, err := c.CacheStats(); err != nil {
+		t.Fatalf("CACHE STATS after Authenticate: %v", err)
+	}
+}
+
+func TestE2EAuthWrongTokenFailsConnect(t *testing.T) {
+	requireAdminToken(t)
+	host, port := e2eAddr()
+	c := NewClientWithConfig(ClientConfig{
+		Host: host, Port: port, TimeoutMs: 5000, AdminToken: "wrong_token_e2e",
+	})
+	t.Cleanup(func() { _ = c.Close() })
+
+	err := c.Connect()
+	if err == nil {
+		t.Fatal("Connect succeeded with a wrong admin token")
+	}
+	var se *ServerError
+	if !errors.As(err, &se) {
+		t.Fatalf("error = %T (%v), want *ServerError", err, err)
+	}
+	// A rejected AUTH must leave nothing half-open behind it.
+	if c.IsConnected() {
+		t.Error("IsConnected() = true after a rejected AUTH")
+	}
+}
+
+func TestE2EAuthPooledConnections(t *testing.T) {
+	token := requireAdminToken(t)
+	host, port := e2eAddr()
+	p := NewPool(PoolConfig{
+		ClientConfig: ClientConfig{Host: host, Port: port, TimeoutMs: 15000, AdminToken: token},
+		MaxOpenConns: 2,
+	})
+	t.Cleanup(func() { _ = p.Close() })
+
+	// An administrative command over a pooled connection only succeeds if that
+	// connection authenticated as it was opened; the pool never sees AUTH.
+	for i := range 2 {
+		if _, err := p.CacheStats(); err != nil {
+			t.Fatalf("CACHE STATS over pooled connection %d: %v", i, err)
+		}
+	}
+}
+
+// -----------------------------------------------------------------------------
+// typed server errors
+// -----------------------------------------------------------------------------
+
+func TestE2EServerErrorCode(t *testing.T) {
+	c := newE2EClient(t)
+
+	_, err := c.Search("no_such_table_e2e", "python", SearchOptions{})
+	if err == nil {
+		t.Fatal("Search against an unknown table succeeded")
+	}
+	var se *ServerError
+	if !errors.As(err, &se) {
+		t.Fatalf("error = %T (%v), want *ServerError", err, err)
+	}
+	// A pre-v1.10 server sends the same rejection without a code, which is
+	// ErrCodeNone rather than a wrong code.
+	switch se.Code {
+	case ErrCodeNone:
+		t.Logf("server sent an uncoded ERROR frame: %v", se)
+	case ErrCodeTableNotFound:
+		// The code is carried in the field, not left in the message.
+		if strings.HasPrefix(se.Message, strconv.Itoa(int(ErrCodeTableNotFound))) {
+			t.Errorf("Message still carries the numeric code: %q", se.Message)
+		}
+		if se.Retryable() {
+			t.Error("Retryable() = true for a missing table")
+		}
+	default:
+		t.Errorf("Code = %d, want %d (table not found)", se.Code, ErrCodeTableNotFound)
 	}
 }
 
@@ -823,6 +1009,81 @@ func TestE2ESyncFamily(t *testing.T) {
 		t.Fatalf("Sync: %v", err)
 	}
 	t.Cleanup(func() { _, _ = c.SyncStop(table) })
+
+	// SYNC is asynchronous: the server acknowledges at once and rebuilds the
+	// table in the background, rejecting queries against it with
+	// ErrCodeServerNotReady until it finishes. Leaving that in flight would
+	// fail whichever test runs next, so the test that starts a resync is the
+	// one that waits for it.
+	waitForSyncIdle(t, c, table, 30*time.Second)
+}
+
+// syncInFlightStates are the SYNC STATUS values that mean a resync is still
+// running. Terminal states (COMPLETED, FAILED) and any state this client does
+// not know are treated as settled, so an unfamiliar report cannot stall the
+// suite — a table that is in fact still syncing surfaces as a failure in the
+// test that queries it, which is louder than a timeout here.
+var syncInFlightStates = map[string]bool{
+	"STARTING":    true,
+	"IN_PROGRESS": true,
+	"RUNNING":     true,
+	"PENDING":     true,
+}
+
+// waitForSyncIdle polls SYNC STATUS until table reports no in-flight resync.
+func waitForSyncIdle(t *testing.T, c *Client, table string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		report, err := c.SyncStatus()
+		if err != nil {
+			// A server that does not report sync status has nothing to wait on.
+			if isProtocolError(err) {
+				return
+			}
+			t.Fatalf("SyncStatus: %v", err)
+		}
+		if !syncInFlight(report, table) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("SYNC of %q did not settle within %s; last report:\n%s", table, timeout, report)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// syncInFlight reports whether a SYNC_STATUS report shows table mid-resync.
+//
+// A report line reads "table=<db>.<name> status=<state> ...". The table is
+// matched on its unqualified name, since SYNC accepts a bare name while the
+// report always answers with the qualified one.
+func syncInFlight(report, table string) bool {
+	want := bareTableName(table)
+	for _, line := range strings.Split(strings.ReplaceAll(report, "\r\n", "\n"), "\n") {
+		var reported, state string
+		for _, f := range strings.Fields(line) {
+			switch {
+			case strings.HasPrefix(f, "table="):
+				reported = bareTableName(strings.TrimPrefix(f, "table="))
+			case strings.HasPrefix(f, "status="):
+				state = strings.TrimPrefix(f, "status=")
+			}
+		}
+		if reported == want && syncInFlightStates[state] {
+			return true
+		}
+	}
+	return false
+}
+
+// bareTableName strips a database qualifier so a bare name compares equal to
+// the qualified one the server reports back.
+func bareTableName(identity string) string {
+	if _, table, err := ParseTableIdentity(identity); err == nil {
+		return table
+	}
+	return identity
 }
 
 // -----------------------------------------------------------------------------
