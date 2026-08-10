@@ -24,17 +24,21 @@ const (
 	// a pre-v1.10 server reports every failure.
 	ErrCodeNone ErrorCode = 0
 
-	ErrCodeUnknown          ErrorCode = 1
-	ErrCodeInvalidArgument  ErrorCode = 2
-	ErrCodeOutOfRange       ErrorCode = 3
-	ErrCodeNotImplemented   ErrorCode = 4
-	ErrCodeInternalError    ErrorCode = 5
-	ErrCodeIOError          ErrorCode = 6
+	ErrCodeUnknown         ErrorCode = 1
+	ErrCodeInvalidArgument ErrorCode = 2
+	ErrCodeOutOfRange      ErrorCode = 3
+	ErrCodeNotImplemented  ErrorCode = 4
+	ErrCodeInternalError   ErrorCode = 5
+	ErrCodeIOError         ErrorCode = 6
+
+	// ErrCodePermissionDenied rejects an administrative command issued without
+	// a successful AUTH, and a failed AUTH itself (MygramDB >= v1.10).
 	ErrCodePermissionDenied ErrorCode = 7
-	ErrCodeNotFound         ErrorCode = 8
-	ErrCodeAlreadyExists    ErrorCode = 9
-	ErrCodeTimeout          ErrorCode = 10
-	ErrCodeCancelled        ErrorCode = 11
+
+	ErrCodeNotFound      ErrorCode = 8
+	ErrCodeAlreadyExists ErrorCode = 9
+	ErrCodeTimeout       ErrorCode = 10
+	ErrCodeCancelled     ErrorCode = 11
 )
 
 // Query codes (3000-3999).

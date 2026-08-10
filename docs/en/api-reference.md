@@ -495,11 +495,18 @@ type ServerInfo struct {
 func (i *ServerInfo) Ready() bool // Readiness == "ready"
 
 type ReplicationStatus struct {
-    Running         bool
-    GTID            string
-    StatusStr       string
-    ProcessedEvents int
-    QueueSize       int
+    Running                 bool
+    GTID                    string
+    StatusStr               string
+    ProcessedEvents         int
+    QueueSize               int
+    State                   string    // "running" | "stopped" | "failed" | "not_configured" (v1.10+)
+    CRCErrors               int       // binlog events whose checksum did not verify (v1.10+)
+    SchemaIncompatible      bool      // stopped because MySQL no longer matches the config (v1.10+)
+    LastErrorCode           ErrorCode // last failure, ErrCodeNone when none (v1.10+)
+    LastError               string    // message for LastErrorCode (v1.10+)
+    LastAppliedUnixtime     int64     // when the last event was applied (v1.10+)
+    SecondsSinceLastApplied int64     // replication lag; -1 until an event is applied (v1.10+)
 }
 
 type DebugInfo struct {

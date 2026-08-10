@@ -589,6 +589,92 @@ func TestParseReplicationStatusResponse(t *testing.T) {
 			t.Error("Running should be false")
 		}
 	})
+
+	t.Run("diagnostics fields", func(t *testing.T) {
+		response := "OK REPLICATION\n" +
+			"status: failed\n" +
+			"current_gtid: abc-123\n" +
+			"crc_errors: 3\n" +
+			"schema_incompatible: true\n" +
+			"last_error_code: 2017\n" +
+			"last_error: undecodable binlog event\n" +
+			"last_applied_unixtime: 1786368383\n" +
+			"seconds_since_last_applied: 42\n" +
+			"END"
+		status, err := parseReplicationStatusResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.Running {
+			t.Error("Running should be false for state 'failed'")
+		}
+		if status.State != "failed" {
+			t.Errorf("State = %q, want %q", status.State, "failed")
+		}
+		if status.CRCErrors != 3 {
+			t.Errorf("CRCErrors = %d, want 3", status.CRCErrors)
+		}
+		if !status.SchemaIncompatible {
+			t.Error("SchemaIncompatible should be true")
+		}
+		if status.LastErrorCode != ErrorCode(2017) {
+			t.Errorf("LastErrorCode = %d, want 2017", status.LastErrorCode)
+		}
+		if status.LastError != "undecodable binlog event" {
+			t.Errorf("LastError = %q", status.LastError)
+		}
+		if status.LastAppliedUnixtime != 1786368383 {
+			t.Errorf("LastAppliedUnixtime = %d, want 1786368383", status.LastAppliedUnixtime)
+		}
+		if status.SecondsSinceLastApplied != 42 {
+			t.Errorf("SecondsSinceLastApplied = %d, want 42", status.SecondsSinceLastApplied)
+		}
+	})
+
+	t.Run("state distinguishes a stop from a failure", func(t *testing.T) {
+		// Running is false either way, so State is the only field that says
+		// whether the reader was asked to stop or died.
+		for _, state := range []string{"stopped", "failed", "not_configured"} {
+			status, err := parseReplicationStatusResponse("OK REPLICATION\nstatus: " + state + "\nEND")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Running {
+				t.Errorf("Running should be false for state %q", state)
+			}
+			if status.State != state {
+				t.Errorf("State = %q, want %q", status.State, state)
+			}
+		}
+	})
+
+	t.Run("lag sentinel is passed through", func(t *testing.T) {
+		// A server that has applied nothing yet reports -1 rather than 0, so a
+		// caller can tell "no data" from "fully caught up".
+		response := "OK REPLICATION\nstatus: running\nlast_applied_unixtime: 0\nseconds_since_last_applied: -1\nEND"
+		status, err := parseReplicationStatusResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.LastAppliedUnixtime != 0 {
+			t.Errorf("LastAppliedUnixtime = %d, want 0", status.LastAppliedUnixtime)
+		}
+		if status.SecondsSinceLastApplied != -1 {
+			t.Errorf("SecondsSinceLastApplied = %d, want -1", status.SecondsSinceLastApplied)
+		}
+	})
+
+	t.Run("diagnostics absent on an older server", func(t *testing.T) {
+		status, err := parseReplicationStatusResponse("OK REPLICATION\nstatus: running\ncurrent_gtid: abc\nEND")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.CRCErrors != 0 || status.SchemaIncompatible ||
+			status.LastErrorCode != ErrCodeNone || status.LastError != "" ||
+			status.LastAppliedUnixtime != 0 || status.SecondsSinceLastApplied != 0 {
+			t.Errorf("diagnostics should stay zero-valued; got %+v", status)
+		}
+	})
 }
 
 func TestParseDumpStatusResponse(t *testing.T) {

@@ -498,11 +498,18 @@ type ServerInfo struct {
 func (i *ServerInfo) Ready() bool // Readiness == "ready"
 
 type ReplicationStatus struct {
-    Running         bool
-    GTID            string
-    StatusStr       string
-    ProcessedEvents int
-    QueueSize       int
+    Running                 bool
+    GTID                    string
+    StatusStr               string
+    ProcessedEvents         int
+    QueueSize               int
+    State                   string    // "running" | "stopped" | "failed" | "not_configured" (v1.10+)
+    CRCErrors               int       // チェックサム検証に失敗した binlog イベント数 (v1.10+)
+    SchemaIncompatible      bool      // MySQL のスキーマが設定と一致せず停止 (v1.10+)
+    LastErrorCode           ErrorCode // 直近の失敗コード。失敗がなければ ErrCodeNone (v1.10+)
+    LastError               string    // LastErrorCode に対応するメッセージ (v1.10+)
+    LastAppliedUnixtime     int64     // 最後にイベントを適用した Unix 時刻 (v1.10+)
+    SecondsSinceLastApplied int64     // レプリケーション遅延。未適用の間は -1 (v1.10+)
 }
 
 type DebugInfo struct {

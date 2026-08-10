@@ -444,6 +444,48 @@ type ReplicationStatus struct {
 	// QueueSize is the number of events currently pending in the
 	// replication apply queue. Populated only by the multi-line response.
 	QueueSize int
+
+	// State is the reported state: "running", "stopped", "failed" or
+	// "not_configured" (MygramDB >= v1.10). It distinguishes a reader that
+	// stopped on an error from one stopped on request, which Running alone
+	// cannot. An unrecognized value is passed through rather than dropped, so
+	// a state a future server adds stays visible. Empty for the single-line
+	// response and for a server that omits the field.
+	State string
+
+	// CRCErrors counts binlog events whose checksum did not verify
+	// (MygramDB >= v1.10).
+	CRCErrors int
+
+	// SchemaIncompatible reports that replication stopped because the MySQL
+	// schema no longer matches the configured columns (MygramDB >= v1.10).
+	SchemaIncompatible bool
+
+	// LastErrorCode is the code of the last replication failure
+	// (MygramDB >= v1.10), drawn from the same space as ErrorCode. It is
+	// ErrCodeNone while no failure is recorded; the server clears it once a
+	// start succeeds.
+	LastErrorCode ErrorCode
+
+	// LastError is the message belonging to LastErrorCode
+	// (MygramDB >= v1.10). Empty while no failure is recorded.
+	LastError string
+
+	// LastAppliedUnixtime is the Unix time at which the last event was
+	// applied (MygramDB >= v1.10). The server stamps it where the replication
+	// position advances, so it tracks applied progress rather than mere
+	// connectivity. It is 0 while no event has been applied yet, which is the
+	// normal state of a server that has just started.
+	LastAppliedUnixtime int64
+
+	// SecondsSinceLastApplied is the replication lag derived from
+	// LastAppliedUnixtime (MygramDB >= v1.10) — the field to alert on.
+	//
+	// The server reports -1 while no event has been applied, so a lag
+	// threshold must exclude the negative sentinel rather than treat it as a
+	// lag of zero. Use LastAppliedUnixtime != 0 to tell "no data yet" from a
+	// genuinely current replica.
+	SecondsSinceLastApplied int64
 }
 
 // DebugInfo holds query metrics from debug mode.

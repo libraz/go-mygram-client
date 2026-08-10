@@ -317,12 +317,29 @@ func parseReplicationStatusResponse(response string) (*ReplicationStatus, error)
 			switch key {
 			case "status":
 				status.Running = value == "running"
+				status.State = value
 			case "current_gtid", "gtid":
 				status.GTID = value
 			case "processed_events":
 				status.ProcessedEvents, _ = strconv.Atoi(value)
 			case "queue_size":
 				status.QueueSize, _ = strconv.Atoi(value)
+			case "crc_errors":
+				status.CRCErrors, _ = strconv.Atoi(value)
+			case "schema_incompatible":
+				status.SchemaIncompatible = value == "true"
+			case "last_error_code":
+				// The server reports 0 for "no failure recorded", which is
+				// what ErrCodeNone already means, so it needs no special case.
+				if code, err := strconv.ParseUint(value, 10, 16); err == nil {
+					status.LastErrorCode = ErrorCode(code)
+				}
+			case "last_error":
+				status.LastError = value
+			case "last_applied_unixtime":
+				status.LastAppliedUnixtime, _ = strconv.ParseInt(value, 10, 64)
+			case "seconds_since_last_applied":
+				status.SecondsSinceLastApplied, _ = strconv.ParseInt(value, 10, 64)
 			}
 		}
 		return status, nil
