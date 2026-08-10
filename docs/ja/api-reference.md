@@ -36,12 +36,19 @@ func NewClientWithConfig(config ClientConfig) *Client
 func (c *Client) Connect() error
 func (c *Client) Close() error
 func (c *Client) IsConnected() bool
+func (c *Client) Authenticate(token string) error
 ```
 
 `Connect` はサーバーに接続し（`TimeoutMs` を尊重）、`Close` は接続を切断します。
 `Close` は defer しても安全です。`Client` は 1 本の接続を持ってコマンドを直列化
 するため、一度に 1 リクエストを処理します。複数のゴルーチンから呼び出しても
 安全ですが、並行には実行されません。
+
+`Authenticate` は `AUTH` を送り、トークンを記憶します。そのため再接続時には
+次のコマンドの前に再認可されます。[`ClientConfig.AdminToken`](#clientconfig) を
+設定すれば明示的な呼び出しなしで同じことができ、`Pool` の接続を認証する手段は
+これだけです。[高度な使い方](advanced-usage.md#管理コマンドの認証) を参照して
+ください。
 
 ### 検索メソッド
 
@@ -76,6 +83,23 @@ resp, err := client.Search("articles", "golang tutorial", mygram.SearchOptions{
 `SearchWithHighlights` は `HIGHLIGHT` 句を有効にした同じ呼び出しで、
 `SearchResult.Snippet` にスニペットを返します。
 
+`Filters` が表現できるのは等価比較だけです。比較演算子を使う場合は
+`FilterConditions` を、`SearchRaw` が受け付けない型付きオプションと式を
+組み合わせる場合は `QueryMode: mygram.QueryBoolean` を指定します
+（MygramDB v1.9 以降）。
+
+```go
+resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
+    QueryMode: mygram.QueryBoolean,
+    FilterConditions: []mygram.FilterCondition{
+        {Key: "views", Op: mygram.FilterGreaterThanOrEqual, Value: "100"},
+        {Key: "status", Op: mygram.FilterNotEqual, Value: "3"},
+    },
+    SortColumn: "created_at",
+    SortDesc:   true,
+})
+```
+
 #### SearchRaw
 
 構築済みのブール式をそのまま（引用符なしで）送り（MygramDB v1.8 以降）、
@@ -104,7 +128,9 @@ fmt.Println(cnt.Count)
 #### Facet
 
 フィルタ列の distinct な値を、値ごとのドキュメント数とともに集計します。任意で
-クエリにスコープを絞れます（MygramDB v1.6 以降）。
+クエリにスコープを絞れます（MygramDB v1.6 以降）。`Limit` と `Offset` で値を
+ページングでき、`FacetResponse.TotalCount` はページング前の distinct 値の総数を
+返します（MygramDB v1.9 以降）。
 [高度な使い方](advanced-usage.md#ファセット) を参照してください。
 
 ### ドキュメントメソッド
@@ -113,8 +139,10 @@ fmt.Println(cnt.Count)
 func (c *Client) Get(table, primaryKey string) (*Document, error)
 ```
 
-主キーで単一のドキュメントを取得します。ドキュメントが存在しない場合は
-`*ProtocolError`（または `*ServerError`）を返します。
+主キーで単一のドキュメントを取得します。主キーは可逆的にエスケープされるため、
+空白や引用符を含むものも含めて、サーバーが返せる主キーはそのまま送り返せます。
+ドキュメントが存在しない場合は `*ProtocolError`（または `*ServerError`）を
+返します。
 
 ### サーバー情報
 
@@ -123,8 +151,10 @@ func (c *Client) Info() (*ServerInfo, error)
 func (c *Client) GetConfig() (string, error)
 ```
 
-`Info` はバージョン、稼働時間、ドキュメント数、テーブル一覧を返します。
-`GetConfig` はサーバー設定を生の YAML 文字列として返します。
+`Info` はバージョン、稼働時間、ドキュメント数、テーブル一覧を返し、MygramDB
+v1.10 以降ではレディネスの判定（`ServerInfo.DataInitialized`、
+`ServerInfo.Readiness`、`ServerInfo.Ready()`）も返します。`GetConfig` は
+サーバー設定を生の YAML 文字列として返します。
 
 ### レプリケーション
 
@@ -174,6 +204,7 @@ func (c *Client) SyncStop(table string) (string, error)
 
 ```go
 func (c *Client) DumpSave(filepath string) (string, error)
+func (c *Client) DumpSaveAndWait(filepath string) (string, error)
 func (c *Client) DumpLoad(filepath string) error
 func (c *Client) DumpStatus() (*DumpStatus, error)
 func (c *Client) DumpVerify(filepath string) (string, error)
@@ -188,6 +219,13 @@ func (c *Client) CacheDisable() error
 
 インデックスのスナップショット取得・復元（`Dump*`）、テーブルのインデックス
 再構築（`Optimize`）、クエリキャッシュの検査・制御（`Cache*`）を行います。
+
+非同期実行されるほど大きいダンプは `OK DUMP_STARTED <path>` で受理され、
+書き出しはバックグラウンドで続きます。`DumpSave` はこの受理応答をそのまま返し、
+完了の監視は呼び出し側に委ねます。`DumpSaveAndWait` は `DUMP STATUS` を
+ポーリングし、完了時は実際に書き出されたパスを、失敗時は `*ServerError` を
+返します。待ち時間の上限は `ClientConfig.DumpSaveTimeoutMs` です。同期的に
+完了する小さいダンプは `OK SAVED <path>` で受理され、どちらも即座に返ります。
 
 ### 生コマンド
 
@@ -226,6 +264,13 @@ type ClientConfig struct {
     Port            int    // default 11016
     SocketPath      string // Unix socket path; takes priority over TCP
     TimeoutMs       int    // command timeout in ms (default 5000)
+
+    ConnectTimeoutMs    int // dial + AUTH timeout in ms (0 = use TimeoutMs)
+    DumpSaveTimeoutMs   int // DumpSaveAndWait poll budget in ms (default 300000)
+    DumpLoadTimeoutMs   int // DUMP LOAD timeout in ms (default 300000)
+    DumpVerifyTimeoutMs int // DUMP VERIFY timeout in ms (default 300000)
+    OptimizeTimeoutMs   int // OPTIMIZE timeout in ms (default 300000)
+
     RecvBufferSize  int    // receive buffer size in bytes (default 65536)
     MaxQueryLength  int    // max query expression length (default 128; 0 = unlimited)
     MaxResponseSize int    // max response size in bytes (default 0 = unlimited)
@@ -233,12 +278,19 @@ type ClientConfig struct {
     AutoReconnect       bool          // reconnect + resend once on a pre-write drop (default false)
     DisableTCPKeepAlive bool          // turn off the SO_KEEPALIVE idle override (default off; keep-alive on)
     TCPKeepAliveIdle    time.Duration // idle before keep-alive probing begins (default 60s)
+    AdminToken          string        // AUTH token replayed on every connection (v1.10+; default none)
 }
 ```
 
 `AutoReconnect`、`DisableTCPKeepAlive`、`TCPKeepAliveIdle` については
 [高度な使い方](advanced-usage.md#tcp-キープアライブ) を参照してください。`Pool` は
 自身が所有する接続では常に `AutoReconnect` を有効にします。
+
+`DumpLoadTimeoutMs`、`DumpVerifyTimeoutMs`、`OptimizeTimeoutMs` は、インデックス
+全体を再構築または走査するコマンドに適用されます。これらがないと、5 秒の
+`TimeoutMs` によって、サーバーがまだ実行中のコマンドを打ち切ってしまいます。
+`TimeoutMs` と同じ値を設定すれば無効化できます。`*Context` 版に渡した
+コンテキストの期限は、そちらが短い場合には引き続き優先されます。
 
 ### CircuitBreakerConfig
 
@@ -283,9 +335,68 @@ type SearchOptions struct {
     NotTerms   []string          // excluded terms
     Filters    map[string]string // column filter conditions
     SortColumn string            // sort column; "_score" for BM25 (default primary key)
-    SortDesc   bool              // descending order
+    SortDesc   bool              // descending order; applies to SortColumn
     Fuzzy      int               // Levenshtein distance 0/1/2 (v1.6+)
     Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil (v1.6+)
+
+    FilterConditions []FilterCondition // filters with a comparison operator (v1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    SortPrimaryKey   PrimaryKeySort    // primary-key ordering with no sort column
+}
+```
+
+`Filters` のエントリはキーのソート順で、続いて `FilterConditions` がスライスの
+順で送られます。したがって同じオプションからは常に同じコマンドが生成されます。
+
+### PrimaryKeySort
+
+```go
+type PrimaryKeySort uint8
+
+const (
+    PrimaryKeySortDefault PrimaryKeySort = iota // omit SORT; server orders by primary key descending
+    PrimaryKeySortAsc                           // SORT ASC  — primary key ascending
+    PrimaryKeySortDesc                          // SORT DESC — primary key descending, stated explicitly
+)
+```
+
+`SortDesc` は明示的な `SortColumn` の並び順を選ぶだけなので、主キーの**昇順**は
+`SortPrimaryKey` からしか指定できません。`SortColumn` と既定値以外の
+`SortPrimaryKey` を同時に設定すると `*ValidationError` になります。1 つの
+リクエストが持てる `SORT` 句は 1 つだけだからです。
+
+```go
+resp, err := client.Search("articles", "golang", mygram.SearchOptions{
+    SortPrimaryKey: mygram.PrimaryKeySortAsc,
+    Limit:          20,
+})
+```
+
+### QueryMode と FilterCondition
+
+```go
+type QueryMode uint8
+
+const (
+    QueryLiteral QueryMode = iota // quote the text; reserved words stay data (default)
+    QueryBoolean                  // send verbatim; AND / OR / NOT and parentheses are operators
+)
+
+type FilterOp uint8
+
+const (
+    FilterEqual FilterOp = iota // "="  (zero value)
+    FilterNotEqual              // "!="
+    FilterGreaterThan           // ">"
+    FilterGreaterThanOrEqual    // ">="
+    FilterLessThan              // "<"
+    FilterLessThanOrEqual       // "<="
+)
+
+type FilterCondition struct {
+    Key   string   // filter column; sent unquoted, so it must be an identifier
+    Op    FilterOp // default FilterEqual
+    Value string
 }
 ```
 
@@ -316,9 +427,11 @@ type SearchRawOptions struct {
 
 ```go
 type CountOptions struct {
-    AndTerms []string
-    NotTerms []string
-    Filters  map[string]string
+    AndTerms         []string
+    NotTerms         []string
+    Filters          map[string]string
+    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
 }
 ```
 
@@ -326,11 +439,13 @@ type CountOptions struct {
 
 ```go
 type FacetOptions struct {
-    Query    string            // scope aggregation to matching documents
-    AndTerms []string
-    NotTerms []string
-    Filters  map[string]string
-    Limit    int               // bound the number of (value, count) pairs (0 = no limit)
+    Query            string            // scope aggregation to matching documents
+    AndTerms         []string
+    NotTerms         []string
+    Filters          map[string]string
+    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    Limit            int               // bound the number of (value, count) pairs (0 = no limit)
+    Offset           int               // distinct values to skip (v1.9+)
 }
 ```
 
@@ -364,7 +479,8 @@ type FacetValue struct {
 }
 
 type FacetResponse struct {
-    Results []FacetValue // ordered by count descending
+    Results    []FacetValue // ordered by count descending; one page when Limit/Offset are set
+    TotalCount int64        // distinct values before OFFSET and LIMIT (v1.9+)
 }
 
 type ServerInfo struct {
@@ -375,7 +491,11 @@ type ServerInfo struct {
     IndexSizeBytes    int
     DocCount          int
     Tables            []string
+    DataInitialized   bool   // initial index state built (v1.10+)
+    Readiness         string // "ready" or "not_ready" (v1.10+); empty on older servers
 }
+
+func (i *ServerInfo) Ready() bool // Readiness == "ready"
 
 type ReplicationStatus struct {
     Running         bool
@@ -399,7 +519,12 @@ type DebugInfo struct {
 
 `DumpStatus` と `CacheStats` は、それぞれ `DUMP STATUS` と `CACHE STATS` を
 解析したフィールドを保持します。フィールドの完全な一覧はそれぞれの godoc を
-参照してください。
+参照してください。`CacheStats` は v1.10 サーバーが報告するすべてのキーを
+カバーします。ヒット数のカウンタ、ペイロード・無効化インデックス・無効化キュー
+に分けたメモリ内訳、理由別の登録拒否数、無効化の総数です。古いサーバーが
+出力しないキーはゼロ値のままになります。`AvgHitTimeMs` と `AvgMissTimeMs` が
+`*float64` なのは、対応するカウンタが 0 の間サーバーがこれらを出力しないため
+です。単なる `0` では両者を区別できません。
 
 ## エラー型
 
@@ -411,8 +536,8 @@ type DebugInfo struct {
 | `*ConnectionError` | 接続に失敗した、または送受信中に接続レベルの障害が発生した |
 | `*ProtocolError` | サーバーが不正または予期しない応答を返した |
 | `*TimeoutError` | コマンドが締め切りを超過した。`net.Error` を満たす（`Timeout()` が `true`）。呼び出し側の context の締切が原因の場合は `context.DeadlineExceeded` を wrap する |
-| `*ValidationError` | クライアント側の入力検証に失敗した（制御文字、長さ超過のクエリ） |
-| `*ServerError` | サーバーが明示的な `ERROR` を返した |
+| `*ValidationError` | クライアント側の入力検証に失敗した（制御文字、識別子中のプロトコル区切り文字、長さ超過のクエリ） |
+| `*ServerError` | サーバーが明示的な `ERROR` を返した。MygramDB v1.10 以降では数値の `Code` を伴う |
 | `*CircuitOpenError` | プールのサーキットブレーカーが開いている（または試行が実行中のハーフオープン）。ネットワークに触れず送出され、呼び出し側は素早く失敗する。ネットワーク障害には分類されないため、これ自体がブレーカーを駆動することはない |
 
 ```go
@@ -424,6 +549,43 @@ type ConnectionError struct {
 
 `ConnectionError` は `Unwrap` を実装しているため、`errors.Is(err, io.EOF)` の
 ような検査が根本原因まで到達します。
+
+### サーバーのエラーコード
+
+MygramDB v1.10 以降、すべての `ERROR` フレームは `ERROR <code> <message>` の形
+を取り、コードは `ServerError.Code` に解析されます。それより古いサーバーは
+コードなしのフレームを送り、その場合は `ErrCodeNone` として報告されます。
+つまり「コードなし」と実際のコードは、メッセージ本文から推測せずに区別できます。
+
+```go
+type ErrorCode uint16
+
+type ServerError struct {
+    Message string    // the frame's message, without the code prefix
+    Code    ErrorCode // ErrCodeNone on a pre-v1.10 server
+}
+
+func (e *ServerError) Retryable() bool
+func (c ErrorCode) Retryable() bool
+func ServerErrorCode(err error) (ErrorCode, bool)
+```
+
+`Retryable` が真になるのは一過性のコード、すなわち `ErrCodeServerLoading`
+（6028）、`ErrCodeServerNotReady`（6029）、`ErrCodeServerBusy`（6030）だけです。
+これらはコマンドを実行する**前**にサーバーが返すため、状態を変えるコマンドで
+あっても再送は安全です。`Pool` は通常のバックオフのもとでこれらだけを再試行し、
+他のコードは決定的な失敗としてそのまま返します。
+
+クライアントが対処しうるコードには名前付き定数があります
+（`ErrCodeTableNotFound`、`ErrCodePermissionDenied`、`ErrCodeQuerySyntaxError`
+など）。ワイヤ上には任意の `uint16` が現れうるため、未知の値は不透明な
+サーバーエラーとして扱ってください。
+
+```go
+if code, ok := mygram.ServerErrorCode(err); ok && code == mygram.ErrCodeTableNotFound {
+    // テーブルがサーバーのカタログに存在しない
+}
+```
 
 ## 検索式の関数
 

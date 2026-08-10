@@ -35,12 +35,19 @@ it is not in that form. `NewClientWithConfig` fills any zero-valued
 func (c *Client) Connect() error
 func (c *Client) Close() error
 func (c *Client) IsConnected() bool
+func (c *Client) Authenticate(token string) error
 ```
 
 `Connect` dials the server (honoring `TimeoutMs`); `Close` shuts the connection
 down and is safe to defer. A `Client` owns one connection and serializes
 commands, so it handles one request at a time; it is safe to call from multiple
 goroutines but they will not run concurrently.
+
+`Authenticate` sends `AUTH` and remembers the token, so a reconnect
+re-authorizes before the next command. Setting
+[`ClientConfig.AdminToken`](#clientconfig) does the same without an explicit
+call and is the only way to authenticate a `Pool`'s connections. See
+[Advanced Usage](advanced-usage.md#administrative-authentication).
 
 ### Search Methods
 
@@ -74,6 +81,22 @@ resp, err := client.Search("articles", "golang tutorial", mygram.SearchOptions{
 `SearchWithHighlights` is the same call with the `HIGHLIGHT` clause enabled,
 returning snippets in `SearchResult.Snippet`.
 
+`Filters` expresses equality only. For a comparison, use `FilterConditions`,
+and set `QueryMode: mygram.QueryBoolean` to combine an expression with typed
+options that `SearchRaw` does not accept (MygramDB v1.9+):
+
+```go
+resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
+    QueryMode: mygram.QueryBoolean,
+    FilterConditions: []mygram.FilterCondition{
+        {Key: "views", Op: mygram.FilterGreaterThanOrEqual, Value: "100"},
+        {Key: "status", Op: mygram.FilterNotEqual, Value: "3"},
+    },
+    SortColumn: "created_at",
+    SortDesc:   true,
+})
+```
+
 #### SearchRaw
 
 Sends a pre-built boolean expression verbatim, unquoted (MygramDB v1.8+), so the
@@ -102,7 +125,9 @@ fmt.Println(cnt.Count)
 #### Facet
 
 Aggregates distinct values of a filter column with per-value document counts,
-optionally scoped to a query (MygramDB v1.6+). See
+optionally scoped to a query (MygramDB v1.6+). `Limit` and `Offset` page
+through the values, and `FacetResponse.TotalCount` reports how many distinct
+values exist before paging (MygramDB v1.9+). See
 [Advanced Usage](advanced-usage.md#facets).
 
 ### Document Methods
@@ -111,8 +136,10 @@ optionally scoped to a query (MygramDB v1.6+). See
 func (c *Client) Get(table, primaryKey string) (*Document, error)
 ```
 
-Retrieves a single document by primary key. Returns a `*ProtocolError` (or
-`*ServerError`) when the document does not exist.
+Retrieves a single document by primary key. The key is escaped reversibly, so
+any key the server can return can be sent back to it — including one holding
+spaces or quotes. Returns a `*ProtocolError` (or `*ServerError`) when the
+document does not exist.
 
 ### Server Information
 
@@ -121,8 +148,10 @@ func (c *Client) Info() (*ServerInfo, error)
 func (c *Client) GetConfig() (string, error)
 ```
 
-`Info` returns version, uptime, document count, and the table list. `GetConfig`
-returns the server configuration as a raw YAML string.
+`Info` returns version, uptime, document count, the table list, and — on
+MygramDB v1.10+ — the readiness verdict (`ServerInfo.DataInitialized`,
+`ServerInfo.Readiness`, `ServerInfo.Ready()`). `GetConfig` returns the server
+configuration as a raw YAML string.
 
 ### Replication
 
@@ -171,6 +200,7 @@ sync, or every in-flight sync when `table` is `""`.
 
 ```go
 func (c *Client) DumpSave(filepath string) (string, error)
+func (c *Client) DumpSaveAndWait(filepath string) (string, error)
 func (c *Client) DumpLoad(filepath string) error
 func (c *Client) DumpStatus() (*DumpStatus, error)
 func (c *Client) DumpVerify(filepath string) (string, error)
@@ -185,6 +215,14 @@ func (c *Client) CacheDisable() error
 
 Snapshot/restore the index (`Dump*`), rebuild a table's index (`Optimize`), and
 inspect or control the query cache (`Cache*`).
+
+A dump large enough to run asynchronously is acknowledged with
+`OK DUMP_STARTED <path>`, and the write continues in the background.
+`DumpSave` returns that acknowledgement as-is, leaving the polling to the
+caller. `DumpSaveAndWait` polls `DUMP STATUS` until the dump completes and
+returns the path the server actually wrote, or the failure as a `*ServerError`;
+its budget is `ClientConfig.DumpSaveTimeoutMs`. A dump small enough to finish
+inline is acknowledged with `OK SAVED <path>` and both calls return at once.
 
 ### Raw Commands
 
@@ -224,6 +262,13 @@ type ClientConfig struct {
     Port            int    // default 11016
     SocketPath      string // Unix socket path; takes priority over TCP
     TimeoutMs       int    // command timeout in ms (default 5000)
+
+    ConnectTimeoutMs    int // dial + AUTH timeout in ms (0 = use TimeoutMs)
+    DumpSaveTimeoutMs   int // DumpSaveAndWait poll budget in ms (default 300000)
+    DumpLoadTimeoutMs   int // DUMP LOAD timeout in ms (default 300000)
+    DumpVerifyTimeoutMs int // DUMP VERIFY timeout in ms (default 300000)
+    OptimizeTimeoutMs   int // OPTIMIZE timeout in ms (default 300000)
+
     RecvBufferSize  int    // receive buffer size in bytes (default 65536)
     MaxQueryLength  int    // max query expression length (default 128; 0 = unlimited)
     MaxResponseSize int    // max response size in bytes (default 0 = unlimited)
@@ -231,12 +276,19 @@ type ClientConfig struct {
     AutoReconnect       bool          // reconnect + resend once on a pre-write drop (default false)
     DisableTCPKeepAlive bool          // turn off the SO_KEEPALIVE idle override (default off; keep-alive on)
     TCPKeepAliveIdle    time.Duration // idle before keep-alive probing begins (default 60s)
+    AdminToken          string        // AUTH token replayed on every connection (v1.10+; default none)
 }
 ```
 
 `AutoReconnect`, `DisableTCPKeepAlive`, and `TCPKeepAliveIdle` are covered in
 [Advanced Usage](advanced-usage.md#tcp-keep-alive). A `Pool` always enables
 `AutoReconnect` on the connections it owns.
+
+`DumpLoadTimeoutMs`, `DumpVerifyTimeoutMs` and `OptimizeTimeoutMs` apply to
+commands that rebuild or traverse the whole index; without them the 5 second
+`TimeoutMs` would abandon a command the server is still executing. Set one equal
+to `TimeoutMs` to opt out. A context deadline passed to the `*Context` variant
+still wins when it is the shorter of the two.
 
 ### CircuitBreakerConfig
 
@@ -280,9 +332,68 @@ type SearchOptions struct {
     NotTerms   []string          // excluded terms
     Filters    map[string]string // column filter conditions
     SortColumn string            // sort column; "_score" for BM25 (default primary key)
-    SortDesc   bool              // descending order
+    SortDesc   bool              // descending order; applies to SortColumn
     Fuzzy      int               // Levenshtein distance 0/1/2 (v1.6+)
     Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil (v1.6+)
+
+    FilterConditions []FilterCondition // filters with a comparison operator (v1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    SortPrimaryKey   PrimaryKeySort    // primary-key ordering with no sort column
+}
+```
+
+`Filters` entries are sent in sorted key order, then `FilterConditions` in
+slice order, so one set of options always produces the same command.
+
+### PrimaryKeySort
+
+```go
+type PrimaryKeySort uint8
+
+const (
+    PrimaryKeySortDefault PrimaryKeySort = iota // omit SORT; server orders by primary key descending
+    PrimaryKeySortAsc                           // SORT ASC  — primary key ascending
+    PrimaryKeySortDesc                          // SORT DESC — primary key descending, stated explicitly
+)
+```
+
+`SortDesc` only chooses the direction of an explicit `SortColumn`, so primary-key
+*ascending* order is reachable only through `SortPrimaryKey`. Setting both
+`SortColumn` and a non-default `SortPrimaryKey` is a `*ValidationError`: a
+request carries a single `SORT` clause.
+
+```go
+resp, err := client.Search("articles", "golang", mygram.SearchOptions{
+    SortPrimaryKey: mygram.PrimaryKeySortAsc,
+    Limit:          20,
+})
+```
+
+### QueryMode and FilterCondition
+
+```go
+type QueryMode uint8
+
+const (
+    QueryLiteral QueryMode = iota // quote the text; reserved words stay data (default)
+    QueryBoolean                  // send verbatim; AND / OR / NOT and parentheses are operators
+)
+
+type FilterOp uint8
+
+const (
+    FilterEqual FilterOp = iota // "="  (zero value)
+    FilterNotEqual              // "!="
+    FilterGreaterThan           // ">"
+    FilterGreaterThanOrEqual    // ">="
+    FilterLessThan              // "<"
+    FilterLessThanOrEqual       // "<="
+)
+
+type FilterCondition struct {
+    Key   string   // filter column; sent unquoted, so it must be an identifier
+    Op    FilterOp // default FilterEqual
+    Value string
 }
 ```
 
@@ -313,9 +424,11 @@ type SearchRawOptions struct {
 
 ```go
 type CountOptions struct {
-    AndTerms []string
-    NotTerms []string
-    Filters  map[string]string
+    AndTerms         []string
+    NotTerms         []string
+    Filters          map[string]string
+    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
 }
 ```
 
@@ -323,11 +436,13 @@ type CountOptions struct {
 
 ```go
 type FacetOptions struct {
-    Query    string            // scope aggregation to matching documents
-    AndTerms []string
-    NotTerms []string
-    Filters  map[string]string
-    Limit    int               // bound the number of (value, count) pairs (0 = no limit)
+    Query            string            // scope aggregation to matching documents
+    AndTerms         []string
+    NotTerms         []string
+    Filters          map[string]string
+    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    Limit            int               // bound the number of (value, count) pairs (0 = no limit)
+    Offset           int               // distinct values to skip (v1.9+)
 }
 ```
 
@@ -361,7 +476,8 @@ type FacetValue struct {
 }
 
 type FacetResponse struct {
-    Results []FacetValue // ordered by count descending
+    Results    []FacetValue // ordered by count descending; one page when Limit/Offset are set
+    TotalCount int64        // distinct values before OFFSET and LIMIT (v1.9+)
 }
 
 type ServerInfo struct {
@@ -372,7 +488,11 @@ type ServerInfo struct {
     IndexSizeBytes    int
     DocCount          int
     Tables            []string
+    DataInitialized   bool   // initial index state built (v1.10+)
+    Readiness         string // "ready" or "not_ready" (v1.10+); empty on older servers
 }
+
+func (i *ServerInfo) Ready() bool // Readiness == "ready"
 
 type ReplicationStatus struct {
     Running         bool
@@ -396,6 +516,12 @@ type DebugInfo struct {
 
 `DumpStatus` and `CacheStats` carry the parsed fields of `DUMP STATUS` and
 `CACHE STATS` respectively; see their godoc for the full field list.
+`CacheStats` covers every key the v1.10 server reports — hit counters, the
+memory split between payloads, the invalidation index and the invalidation
+queue, admission rejections by reason, and invalidation totals. A key an older
+server omits keeps its zero value. `AvgHitTimeMs` and `AvgMissTimeMs` are
+`*float64` because the server omits them entirely while the matching counter is
+zero, which a plain `0` could not distinguish.
 
 ## Error Types
 
@@ -407,8 +533,8 @@ All command methods return one of these concrete types, matchable with
 | `*ConnectionError` | Failed to connect, or a connection-level failure while sending/receiving |
 | `*ProtocolError` | Server returned a malformed or unexpected response |
 | `*TimeoutError` | The command exceeded its deadline. Satisfies `net.Error` (`Timeout()` is `true`); wraps `context.DeadlineExceeded` when the caller's context deadline was the cause |
-| `*ValidationError` | Client-side input validation failed (control characters, over-length query) |
-| `*ServerError` | Server replied with an explicit `ERROR` |
+| `*ValidationError` | Client-side input validation failed (control characters, protocol delimiters in an identifier, over-length query) |
+| `*ServerError` | Server replied with an explicit `ERROR`, carrying a numeric `Code` on MygramDB v1.10+ |
 | `*CircuitOpenError` | The pool's circuit breaker is open (or half-open with a trial in flight); raised without touching the network so the caller fails fast. Not classified as a network failure, so it does not itself drive the breaker |
 
 ```go
@@ -420,6 +546,42 @@ type ConnectionError struct {
 
 `ConnectionError` implements `Unwrap`, so `errors.Is(err, io.EOF)` and similar
 checks reach the underlying cause.
+
+### Server error codes
+
+From MygramDB v1.10 every `ERROR` frame is `ERROR <code> <message>`, and the
+code is parsed into `ServerError.Code`. An older server sends an uncoded frame,
+which is reported as `ErrCodeNone` — so "no code" is distinguishable from a real
+code rather than guessed at from the message text.
+
+```go
+type ErrorCode uint16
+
+type ServerError struct {
+    Message string    // the frame's message, without the code prefix
+    Code    ErrorCode // ErrCodeNone on a pre-v1.10 server
+}
+
+func (e *ServerError) Retryable() bool
+func (c ErrorCode) Retryable() bool
+func ServerErrorCode(err error) (ErrorCode, bool)
+```
+
+`Retryable` is true only for the transient codes — `ErrCodeServerLoading`
+(6028), `ErrCodeServerNotReady` (6029) and `ErrCodeServerBusy` (6030) — which
+the server returns *before* executing the command, so re-issuing is safe even
+for a state-changing one. A `Pool` retries exactly these under its normal
+backoff; every other code is deterministic and is surfaced immediately.
+
+Named constants cover the codes a client can act on (`ErrCodeTableNotFound`,
+`ErrCodePermissionDenied`, `ErrCodeQuerySyntaxError`, …). Any `uint16` may
+appear on the wire, so treat an unrecognized value as an opaque server error.
+
+```go
+if code, ok := mygram.ServerErrorCode(err); ok && code == mygram.ErrCodeTableNotFound {
+    // the table is not in the server's catalog
+}
+```
 
 ## Search Expression Functions
 

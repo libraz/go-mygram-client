@@ -70,7 +70,12 @@ if errors.Is(err, context.DeadlineExceeded) {
   実行されないようにします。
 - **接続確立の失敗**（サーバーが一時的に到達不能な場合）は、まだ何も送信して
   いないため、どのコマンドでも再試行されます。
-- サーバーエラー、検証エラー、タイムアウトは決してリトライされません。
+- **一過性のサーバー拒否** — MygramDB v1.10 以降の `ErrCodeServerLoading`
+  （6028）、`ErrCodeServerNotReady`（6029）、`ErrCodeServerBusy`（6030）— は、
+  どのコマンドでも再試行されます。サーバーは実行**前**にこれらを返すため、再送
+  しても二重に適用されることはありません。判定はメッセージ本文の照合ではなく、
+  数値コードに基づきます。
+- それ以外のサーバーエラー、検証エラー、タイムアウトは決してリトライされません。
 
 リトライ方針は設定可能です。
 
@@ -131,6 +136,35 @@ err := pool.WithConn(ctx, func(c *mygram.Client) error {
 接続を直接借用します）。プールは `fn` の周囲でリトライを行わず、ブレーカーが
 open でも `WithConn` の呼び出しを即時失敗させません。借用した接続は実行後に
 プールへ返却され、`fn` が接続レベルの失敗を報告した場合は破棄されます。
+
+### 管理コマンドの認証
+
+`api.admin_token` を設定した MygramDB v1.10 以降のサーバー（TCP リスナーが
+ループバック以外にバインドする場合は必須）は、`DUMP`、`SYNC`、`REPLICATION`、
+`CONFIG`、`CACHE`、`OPTIMIZE`、`DEBUG`、`SET`、`SHOW VARIABLES` を `AUTH` の
+背後に置きます。この許可は接続ごとなので、すべてのソケットで送り直す必要が
+あります。
+
+`ClientConfig.AdminToken` を設定すると、接続が確立した直後に `AUTH` が送られ
+ます。自動再接続や `Pool` が開いた接続でも同様です。
+
+```go
+pool := mygram.NewPool(mygram.PoolConfig{
+    ClientConfig: mygram.ClientConfig{
+        Host:       "localhost",
+        Port:       11016,
+        AdminToken: os.Getenv("MYGRAM_ADMIN_TOKEN"),
+    },
+})
+```
+
+トークンが拒否されると `Connect`（およびプールの借用）が
+`ErrCodePermissionDenied` を持つ `*ServerError` で失敗します。設定ミスは最初の
+管理コマンドではなく、起動時に表面化します。
+
+接続後にしかトークンが分からない場合は `Client.Authenticate(token)` を使います。
+トークンを記憶するため、後の再接続でも再認可されます。管理トークンを設定して
+いないサーバーに対する検索専用のワークロードでは、どちらも不要です。
 
 ### サーキットブレーカー
 
@@ -340,6 +374,21 @@ for _, v := range resp.Results {
 }
 ```
 
+MygramDB v1.9 以降では `Limit` と `Offset` でファセットをページングでき、
+`TotalCount` がページング前の distinct 値の総数を返します。ページネーションの
+サイズを決めるにはこれが必要です。
+
+```go
+page, _ := client.Facet("articles", "category", mygram.FacetOptions{
+    Limit:  20,
+    Offset: 40,
+})
+fmt.Printf("showing %d of %d categories\n", len(page.Results), page.TotalCount)
+```
+
+それより古いサーバーはページのサイズしか返さないため、そこでは `TotalCount` は
+`len(Results)` と等しくなります。
+
 ## MygramDB v1.7 の機能
 
 ### データベース修飾されたテーブル識別子
@@ -387,6 +436,102 @@ status, _ := client.SyncStatus()   // raw SYNC_STATUS report
 _, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
 ```
 
+## MygramDB v1.9 の機能
+
+### 比較フィルタ
+
+`Filters` が表現できるのは等価比較だけです。`FilterConditions` はサーバーが
+受け付ける比較演算子（`=`、`!=`、`>`、`>=`、`<`、`<=`）を追加し、両方の形式を
+1 つのリクエストで併用できます。マップのエントリはキーのソート順、条件はスライス
+の順で送られるため、同じオプションからは常に同じコマンドが生成されます
+（サーバーのクエリキャッシュにとって重要です）。
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+    Filters: map[string]string{"status": "1"},
+    FilterConditions: []mygram.FilterCondition{
+        {Key: "views", Op: mygram.FilterGreaterThanOrEqual, Value: "100"},
+        {Key: "created_at", Op: mygram.FilterLessThan, Value: "2026-01-01"},
+    },
+})
+```
+
+`FilterConditions` は `SearchOptions`、`CountOptions`、`FacetOptions` で使え
+ます。
+
+### ブールクエリモード
+
+`Search` はテキストをリテラルなユーザー入力として扱い、トークンを引用符で
+囲みます。そのため `AND` や `LIMIT` を検索すると、句の開始ではなくその語その
+ものが検索されます。`QueryMode: mygram.QueryBoolean` を指定すると、テキストは
+そのまま送られ、サーバーの式パーサーが `AND` / `OR` / `NOT` と括弧を演算子と
+して解釈します。しかも `SearchRaw` では使えない型付きオプションを併用できます。
+
+```go
+resp, _ := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
+    QueryMode:  mygram.QueryBoolean,
+    SortColumn: "created_at",
+    SortDesc:   true,
+    Highlight:  &mygram.HighlightOptions{},
+    Limit:      50,
+})
+```
+
+`SearchRaw` は式だけを扱う簡潔な入口として残っています。フィルタ、ソート、
+ハイライトが絡まない場合はこちらを使ってください。
+
+### 主キーによる並び替え
+
+`SortColumn` を指定しない場合、クライアントは `SORT` 句を省略し、サーバーは
+主キーの降順で並べます。`SortDesc` は明示的なソート列の向きを選ぶだけなので、
+主キーの**昇順**には `SortPrimaryKey` が必要です。これはプロトコルの列名なし
+`SORT ASC` / `SORT DESC` 短縮形を送出します。
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+    SortPrimaryKey: mygram.PrimaryKeySortAsc,
+})
+```
+
+ソート列と主キー順を同時に指定した場合はクライアント側で拒否されます。1 つの
+リクエストが持てる `SORT` 句は 1 つだけだからです。
+
+## MygramDB v1.10 の機能
+
+### レディネス
+
+`INFO` は、HTTP のレディネスエンドポイントと同じ入力から評価した、サーバーの
+状態構築が完了しているかどうかを返します。
+
+```go
+info, _ := client.Info()
+if !info.Ready() {
+    // info.Readiness は "not_ready"。初期インデックスが構築済みかどうかは
+    // info.DataInitialized が示す
+}
+```
+
+どちらのフィールドも古いサーバーには存在せず、その場合 `Readiness` は空、
+`Ready()` は false になります。したがって、MygramDB v1.10 以降の配備だと
+分かっている場合にのみ、これでトラフィックを制御してください。
+
+### エラーコード
+
+すべての `ERROR` フレームは数値コードを伴い、`ServerError.Code` として公開され
+ます。
+
+```go
+if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
+    if code, ok := mygram.ServerErrorCode(err); ok && code == mygram.ErrCodeTableNotFound {
+        // テーブルがサーバーのカタログに存在しない
+    }
+}
+```
+
+プールも同じコードで何を再試行するかを決めます（[リトライの意味論](#リトライの意味論)
+を参照）。v1.10 より前のサーバーからのコードなしフレームは `ErrCodeNone` として
+報告され、メッセージ本文は信頼できる手がかりではないため、決して再試行されません。
+
 ## 永続化とキャッシュの管理
 
 ```go
@@ -410,3 +555,26 @@ _ = client.CacheEnable()
 これらのコマンドはサーバーの状態を変えるため、`Pool` の下ではリクエストが
 サーバーに届かなかった場合のみリトライされます（[リトライの意味論](#リトライの意味論)
 を参照）。
+
+### 長時間かかるコマンド
+
+`DUMP LOAD`、`DUMP VERIFY`、`OPTIMIZE` はインデックス全体を走査または再構築
+するため、通常のリクエストよりはるかに長くかかります。これらは 5 秒の
+`TimeoutMs` ではなく、それぞれ専用の上限（`DumpLoadTimeoutMs`、
+`DumpVerifyTimeoutMs`、`OptimizeTimeoutMs`。いずれも既定 300 秒）を使います。
+`TimeoutMs` のままでは、サーバーがまだ実行中のコマンドを打ち切ってしまうから
+です。`TimeoutMs` と同じ値を設定すれば無効化できます。より短いコンテキストの
+期限は引き続き優先されます。
+
+非同期実行されるほど大きいダンプは `OK DUMP_STARTED <path>` で受理され、
+書き出しはバックグラウンドで続きます。`DumpSave` はこの応答をそのまま返すため、
+`DumpStatus` のポーリングは呼び出し側の仕事になります。`DumpSaveAndWait` は
+そのポーリングを行い、サーバーが実際に書き出したパスを返します。
+
+```go
+path, err := client.DumpSaveAndWait("/var/lib/mygram/snapshot.dump")
+```
+
+待ち時間の上限は `DumpSaveTimeoutMs`（既定 300 秒）か、より短いコンテキストの
+期限です。タイムアウトしてもダンプは止まりません。サーバーは書き出しを続け、
+`DumpStatus` で結果を確認できます。

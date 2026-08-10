@@ -5,8 +5,8 @@ queries with `go-mygram-client`.
 
 ## Prerequisites
 
-- Go 1.23 or newer
-- A running MygramDB server (v1.8 recommended; v1.6 and v1.7 also supported)
+- Go 1.26 or newer
+- A running MygramDB server (v1.10 recommended; v1.6 through v1.9 also supported)
 
 ## Installation
 
@@ -159,6 +159,8 @@ if err != nil {
     case errors.As(err, &valErr):
         log.Println("invalid input:", valErr)
     case errors.As(err, &srvErr):
+        // srvErr.Code is the server's numeric error code on MygramDB v1.10+
+        // (ErrCodeNone on an older server).
         log.Println("server returned an error:", srvErr)
     case errors.As(err, &protoErr):
         log.Println("protocol error:", protoErr)
@@ -169,7 +171,8 @@ if err != nil {
 ```
 
 See the [API Reference](api-reference.md#error-types) for the full list of error
-types.
+types and [Server error codes](api-reference.md#server-error-codes) for the
+numeric codes a MygramDB v1.10+ server attaches to every `ERROR` frame.
 
 `TimeoutError` also satisfies `net.Error` (its `Timeout()` reports `true`), and a
 command that times out because your `context` deadline elapsed wraps
@@ -186,8 +189,9 @@ if errors.Is(err, context.DeadlineExceeded) { /* caused by the ctx deadline */ }
 - [API Reference](api-reference.md) — every method, option, and type
 - [Search Expressions](search-expression.md) — parse web-style search input
 - [Advanced Usage](advanced-usage.md) — connection pooling, resilience features
-  (circuit breaker, observability, TCP keep-alive, auto-reconnect), v1.6/v1.7
-  features, and production patterns
+  (circuit breaker, observability, TCP keep-alive, auto-reconnect),
+  administrative `AUTH`, error codes, the v1.6 through v1.10 search features,
+  and production patterns
 
 ## Troubleshooting
 

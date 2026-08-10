@@ -2,7 +2,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/go-mygram-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/go-mygram-client/actions)
 [![Go Reference](https://pkg.go.dev/badge/github.com/libraz/go-mygram-client.svg)](https://pkg.go.dev/github.com/libraz/go-mygram-client)
-[![Go](https://img.shields.io/badge/go-%E2%89%A51.23-00ADD8?logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![codecov](https://codecov.io/gh/libraz/go-mygram-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/go-mygram-client)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ACD7?logo=go)](https://golangci-lint.run/)
@@ -10,10 +10,15 @@
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-Compatible with MygramDB v1.8 (unquoted raw boolean transport with OR groups
-nested under AND, date-only filter values), v1.7 (database-qualified tables,
-raw boolean search, runtime variables, on-demand sync), and v1.6 (BM25 scoring,
-HIGHLIGHT, FUZZY, FACET).
+Compatible with MygramDB v1.10 (administrative `AUTH`, numeric error codes with
+code-driven retries, readiness in `INFO`, the full `CACHE STATS` surface,
+separate budgets for long-running commands), v1.9 (typed comparison filters,
+boolean query mode, paginated facets, primary-key ordering), v1.8 (unquoted raw boolean transport with
+OR groups nested under AND, date-only filter values), v1.7 (database-qualified
+tables, raw boolean search, runtime variables, on-demand sync), and v1.6 (BM25
+scoring, HIGHLIGHT, FUZZY, FACET). Older servers stay supported: features the
+server does not implement are simply not requested, and an uncoded `ERROR` frame
+is reported without a code.
 
 ## Overview
 
@@ -32,10 +37,12 @@ MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This 
 - **Context Support** — All methods have `context.Context` variants
 - **Search Expression Parser** — Web-style search syntax (+required, -excluded, "phrase", OR, grouping)
 - **Full Protocol Support** — All MygramDB commands (SEARCH, COUNT, GET, INFO, etc.)
-- **Input Validation** — Built-in protection against control character injection
+- **Input Validation** — Built-in protection against control character and protocol-delimiter injection
+- **Typed Errors** — Server `ERROR` frames carry a numeric `ErrorCode`; transient codes drive pool retries
 - **Thread Safe** — Safe for concurrent use
 - **Connection Pooling** — Bounded `Pool` with reconnection and retry for high-throughput workloads
 - **Resilience** — Pool circuit breaker, observability events, TCP keep-alive, and client-level auto-reconnect
+- **Administrative AUTH** — A configured token is replayed on every connection, including reconnects and pooled sockets
 
 ## Installation
 
@@ -120,7 +127,7 @@ retry semantics, and monitoring.
 - [Getting Started](docs/en/getting-started.md) — install, configuration, and error handling
 - [Search Expressions](docs/en/search-expression.md) — parse web-style search input
 - [API Reference](docs/en/api-reference.md) — every method, option, and type
-- [Advanced Usage](docs/en/advanced-usage.md) — connection pooling with the v1.8 resilience features (circuit breaker, observability events, TCP keep-alive, auto-reconnect), and the MygramDB v1.6/v1.7 features (BM25 `_score`, fuzzy, highlighting, facets, multi-database, raw boolean search, runtime variables, on-demand sync)
+- [Advanced Usage](docs/en/advanced-usage.md) — connection pooling and resilience (circuit breaker, observability events, TCP keep-alive, auto-reconnect), administrative `AUTH`, error codes, and the search features added through v1.10 (BM25 `_score`, fuzzy, highlighting, paginated facets, comparison filters, boolean query mode, multi-database, runtime variables, on-demand sync)
 
 Japanese docs live under [`docs/ja/`](docs/ja/). Package-level API docs are also
 on [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client).
@@ -150,6 +157,10 @@ make test-e2e
 # Override the endpoint
 MYGRAM_HOST=db.example.com MYGRAM_PORT=11016 make test-e2e
 
+# Authenticate administrative commands (mandatory from v1.10 on a
+# non-loopback bind)
+MYGRAM_ADMIN_TOKEN=... make test-e2e
+
 # Skip side-effect heavy suites
 MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
 ```
@@ -164,9 +175,10 @@ toggle, dump round-trip) restore the original state on exit.
 server is pulled from `ghcr.io/libraz/mygram-db`), seeds it with a deterministic
 dataset, runs the e2e suite with `MYGRAM_E2E_SEEDED=1`, then tears everything
 down. No local server is required. See [`e2e/docker/`](e2e/docker/README.md) for
-knobs (`MYGRAMDB_VERSION`, `KEEP_UP`, ports). The `TestE2ESeeded` block asserts
-exact result sets (database-qualified identity, phrase + required-filter
-visibility, Japanese ngram matching, `SearchRaw` OR, facet counts).
+knobs (`MYGRAMDB_VERSION`, `MYGRAM_ADMIN_TOKEN`, `KEEP_UP`, ports). The
+`TestE2ESeeded` block asserts exact result sets (database-qualified identity,
+phrase + required-filter visibility, Japanese ngram matching, `SearchRaw` OR,
+facet counts and pagination, comparison filters, boolean query mode).
 
 ## License
 

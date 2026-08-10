@@ -5,8 +5,8 @@
 
 ## 前提条件
 
-- Go 1.23 以降
-- 稼働中の MygramDB サーバー（v1.8 を推奨。v1.6 / v1.7 も利用可）
+- Go 1.26 以降
+- 稼働中の MygramDB サーバー（v1.10 を推奨。v1.6 〜 v1.9 も利用可）
 
 ## インストール
 
@@ -159,6 +159,8 @@ if err != nil {
     case errors.As(err, &valErr):
         log.Println("invalid input:", valErr)
     case errors.As(err, &srvErr):
+        // srvErr.Code は MygramDB v1.10 以降でのサーバーの数値エラーコード
+        // （それより古いサーバーでは ErrCodeNone）。
         log.Println("server returned an error:", srvErr)
     case errors.As(err, &protoErr):
         log.Println("protocol error:", protoErr)
@@ -168,7 +170,10 @@ if err != nil {
 }
 ```
 
-エラー型の一覧は [API リファレンス](api-reference.md#エラー型) を参照してください。
+エラー型の一覧は [API リファレンス](api-reference.md#エラー型) を、MygramDB
+v1.10 以降がすべての `ERROR` フレームに付与する数値コードについては
+[サーバーのエラーコード](api-reference.md#サーバーのエラーコード) を参照して
+ください。
 
 `TimeoutError` は `net.Error` も満たし（`Timeout()` が `true` を返す）、`context`
 の締切超過が原因でコマンドがタイムアウトした場合は `context.DeadlineExceeded` を
@@ -185,8 +190,8 @@ if errors.Is(err, context.DeadlineExceeded) { /* ctx の締切が原因 */ }
 - [API リファレンス](api-reference.md) — すべてのメソッド、オプション、型
 - [検索式](search-expression.md) — Web スタイルの検索入力を解析する
 - [高度な使い方](advanced-usage.md) — コネクションプール、耐障害性機能
-  （サーキットブレーカー、可観測性、TCP キープアライブ、自動再接続）、
-  v1.6/v1.7 の機能、本番環境向けのパターン
+  （サーキットブレーカー、可観測性、TCP キープアライブ、自動再接続）、管理コマンド
+  の `AUTH`、エラーコード、v1.6 〜 v1.10 の検索機能、本番環境向けのパターン
 
 ## トラブルシューティング
 

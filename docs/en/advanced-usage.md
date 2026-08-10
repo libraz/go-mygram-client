@@ -70,7 +70,12 @@ The pool retries only failures that are safe to retry:
   cannot execute twice.
 - **Connection establishment failures** (a briefly unavailable server) are
   retried for any command — nothing has been sent yet.
-- Server errors, validation errors, and timeouts are never retried.
+- **Transient server rejections** — `ErrCodeServerLoading` (6028),
+  `ErrCodeServerNotReady` (6029) and `ErrCodeServerBusy` (6030) on MygramDB
+  v1.10+ — are retried for any command. The server returns these *before*
+  executing, so re-issuing cannot apply anything twice. The decision comes from
+  the numeric code, never from matching the message text.
+- Every other server error, validation errors, and timeouts are never retried.
 
 The retry policy is configurable:
 
@@ -135,6 +140,35 @@ breaker-guarded command path). The pool applies no retries around `fn`, and an
 open breaker does not fast-fail a `WithConn` call. The borrowed connection is
 returned to the pool afterwards, or discarded if `fn` reports a connection-level
 failure.
+
+### Administrative Authentication
+
+A MygramDB v1.10+ server that sets `api.admin_token` — mandatory when its TCP
+listener does not bind to loopback — gates `DUMP`, `SYNC`, `REPLICATION`,
+`CONFIG`, `CACHE`, `OPTIMIZE`, `DEBUG`, `SET` and `SHOW VARIABLES` behind
+`AUTH`. The grant is per-connection, so it has to be replayed on every socket.
+
+Set `ClientConfig.AdminToken` and the client sends `AUTH` as soon as a
+connection is established, including the ones opened by an auto-reconnect and by
+a `Pool`:
+
+```go
+pool := mygram.NewPool(mygram.PoolConfig{
+    ClientConfig: mygram.ClientConfig{
+        Host:       "localhost",
+        Port:       11016,
+        AdminToken: os.Getenv("MYGRAM_ADMIN_TOKEN"),
+    },
+})
+```
+
+A rejected token fails `Connect` (and a pool borrow) with a `*ServerError`
+carrying `ErrCodePermissionDenied`, so a misconfigured token surfaces at startup
+rather than on the first administrative command.
+
+`Client.Authenticate(token)` covers the case where the token is only known after
+connecting. It remembers the token, so a later reconnect re-authorizes too.
+Search-only workloads against a server with no admin token need neither.
 
 ### Circuit Breaker
 
@@ -342,6 +376,21 @@ for _, v := range resp.Results {
 }
 ```
 
+On MygramDB v1.9+ a facet pages with `Limit` and `Offset`, and `TotalCount`
+reports how many distinct values exist before paging — which is what you need to
+size the pagination:
+
+```go
+page, _ := client.Facet("articles", "category", mygram.FacetOptions{
+    Limit:  20,
+    Offset: 40,
+})
+fmt.Printf("showing %d of %d categories\n", len(page.Results), page.TotalCount)
+```
+
+An older server reports only the page size, so `TotalCount` equals
+`len(Results)` there.
+
 ## MygramDB v1.7 Features
 
 ### Database-qualified Table Identity
@@ -389,6 +438,102 @@ status, _ := client.SyncStatus()   // raw SYNC_STATUS report
 _, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
 ```
 
+## MygramDB v1.9 Features
+
+### Comparison Filters
+
+`Filters` expresses equality only. `FilterConditions` adds the comparison
+operators the server accepts — `=`, `!=`, `>`, `>=`, `<`, `<=` — and both forms
+may be combined on one request. Map entries are sent in sorted key order and
+the conditions in slice order, so identical options always produce an identical
+command (which matters for the server's query cache).
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+    Filters: map[string]string{"status": "1"},
+    FilterConditions: []mygram.FilterCondition{
+        {Key: "views", Op: mygram.FilterGreaterThanOrEqual, Value: "100"},
+        {Key: "created_at", Op: mygram.FilterLessThan, Value: "2026-01-01"},
+    },
+})
+```
+
+`FilterConditions` is available on `SearchOptions`, `CountOptions` and
+`FacetOptions`.
+
+### Boolean Query Mode
+
+`Search` treats its text as literal user input: it quotes the token, so a search
+for `AND` or `LIMIT` looks for those words rather than starting a clause. Set
+`QueryMode: mygram.QueryBoolean` to send the text verbatim instead, so the
+server's expression parser reads `AND` / `OR` / `NOT` and parentheses as
+operators — while keeping the typed options that `SearchRaw` does not accept:
+
+```go
+resp, _ := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
+    QueryMode:  mygram.QueryBoolean,
+    SortColumn: "created_at",
+    SortDesc:   true,
+    Highlight:  &mygram.HighlightOptions{},
+    Limit:      50,
+})
+```
+
+`SearchRaw` remains the compact expression-only entry point; use it when no
+filters, sorting or highlighting are involved.
+
+### Primary-key Ordering
+
+With no `SortColumn` the client omits the `SORT` clause and the server orders by
+primary key descending. `SortDesc` only chooses the direction of an explicit
+sort column, so primary-key *ascending* order needs `SortPrimaryKey`, which
+emits the protocol's column-less `SORT ASC` / `SORT DESC` shorthand:
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+    SortPrimaryKey: mygram.PrimaryKeySortAsc,
+})
+```
+
+Naming both a sort column and a primary-key ordering is rejected client-side: a
+request carries a single `SORT` clause.
+
+## MygramDB v1.10 Features
+
+### Readiness
+
+`INFO` reports whether the server has finished building its state, evaluated
+from the same inputs as the HTTP readiness endpoint:
+
+```go
+info, _ := client.Info()
+if !info.Ready() {
+    // info.Readiness is "not_ready"; info.DataInitialized says whether the
+    // initial index is built
+}
+```
+
+Both fields are absent on older servers, where `Readiness` is empty and
+`Ready()` is false — so gate traffic on it only where MygramDB v1.10+ is known
+to be deployed.
+
+### Error Codes
+
+Every `ERROR` frame carries a numeric code, exposed as `ServerError.Code`:
+
+```go
+if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
+    if code, ok := mygram.ServerErrorCode(err); ok && code == mygram.ErrCodeTableNotFound {
+        // the table is not in the server's catalog
+    }
+}
+```
+
+The pool uses the same codes to decide what to retry (see
+[Retry Semantics](#retry-semantics)). An uncoded frame from a pre-v1.10 server
+reports `ErrCodeNone` and is never retried, because its message text is not a
+reliable signal.
+
 ## Persistence and Cache Administration
 
 ```go
@@ -411,3 +556,26 @@ _ = client.CacheEnable()
 
 These commands change server state, so under a `Pool` they are retried only when
 the request never reached the server (see [Retry Semantics](#retry-semantics)).
+
+### Long-running Commands
+
+`DUMP LOAD`, `DUMP VERIFY` and `OPTIMIZE` traverse or rebuild the whole index
+and routinely outlast an ordinary request. They use their own budgets —
+`DumpLoadTimeoutMs`, `DumpVerifyTimeoutMs` and `OptimizeTimeoutMs`, each 300 s
+by default — instead of the 5 s `TimeoutMs`, which would abandon a command the
+server is still executing. Set one equal to `TimeoutMs` to opt out; a shorter
+context deadline still wins.
+
+A dump big enough to run asynchronously is acknowledged with
+`OK DUMP_STARTED <path>` while the write continues in the background.
+`DumpSave` returns that acknowledgement verbatim, so polling `DumpStatus` is the
+caller's job. `DumpSaveAndWait` does the polling and returns the path the server
+actually wrote:
+
+```go
+path, err := client.DumpSaveAndWait("/var/lib/mygram/snapshot.dump")
+```
+
+The wait is bounded by `DumpSaveTimeoutMs` (300 s by default) or by a shorter
+context deadline. Timing out does not stop the dump — the server keeps writing,
+and `DumpStatus` still reports the outcome.

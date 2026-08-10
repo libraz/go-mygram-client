@@ -2,7 +2,7 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/go-mygram-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/go-mygram-client/actions)
 [![Go Reference](https://pkg.go.dev/badge/github.com/libraz/go-mygram-client.svg)](https://pkg.go.dev/github.com/libraz/go-mygram-client)
-[![Go](https://img.shields.io/badge/go-%E2%89%A51.23-00ADD8?logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![codecov](https://codecov.io/gh/libraz/go-mygram-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/go-mygram-client)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ACD7?logo=go)](https://golangci-lint.run/)
@@ -11,10 +11,14 @@
 [MygramDB](https://github.com/libraz/mygram-db/)（MySQL レプリケーション対応の
 高性能インメモリ全文検索エンジン）向けの Go クライアントライブラリです。
 
-MygramDB v1.8（引用符なしの生ブール転送、AND の下にネストした OR グループ、
+MygramDB v1.10（管理コマンドの `AUTH`、数値エラーコードとそれに基づくリトライ判定、
+`INFO` のレディネス、`CACHE STATS` の全項目、長時間コマンド専用のタイムアウト）、
+v1.9（型付き比較フィルタ、ブールクエリモード、ページング可能なファセット、主キー順
+の指定）、v1.8（引用符なしの生ブール転送、AND の下にネストした OR グループ、
 日付のみのフィルタ値）、v1.7（データベース修飾テーブル、生ブール検索、ランタイム
 変数、オンデマンド同期）、v1.6（BM25 スコアリング、HIGHLIGHT、FUZZY、FACET）に
-対応しています。
+対応しています。古いサーバーも引き続き利用できます。サーバーが実装していない機能は
+そもそも要求せず、コードなしの `ERROR` フレームはコードなしのまま報告します。
 
 ## 概要
 
@@ -35,10 +39,12 @@ MygramDB は MySQL FULLTEXT より **25〜200 倍高速** な全文検索を提�
 - **Context 対応** — すべてのメソッドに `context.Context` 版がある
 - **検索式パーサー** — Web 風の検索構文（+必須、-除外、"フレーズ"、OR、グループ化）
 - **完全なプロトコル対応** — MygramDB の全コマンド（SEARCH、COUNT、GET、INFO など）
-- **入力検証** — 制御文字インジェクションに対する組み込みの保護
+- **入力検証** — 制御文字およびプロトコル区切り文字のインジェクションに対する組み込みの保護
+- **型付きエラー** — サーバーの `ERROR` フレームは数値の `ErrorCode` を伴い、一過性のコードはプールのリトライを駆動する
 - **スレッドセーフ** — 並行利用に対して安全
 - **コネクションプール** — 高スループット向けの、再接続とリトライを備えた上限つき `Pool`
 - **レジリエンス** — プールのサーキットブレーカー、可観測性イベント、TCP キープアライブ、クライアントレベルの自動再接続
+- **管理コマンドの AUTH** — 設定したトークンは、再接続やプールのソケットを含むすべての接続で再送される
 
 ## インストール
 
@@ -124,7 +130,7 @@ resp, err := pool.Search("articles", "hello", mygram.SearchOptions{Limit: 100})
 - [はじめに](docs/ja/getting-started.md) — インストール、設定、エラー処理
 - [検索式](docs/ja/search-expression.md) — Web 風の検索入力の解析
 - [API リファレンス](docs/ja/api-reference.md) — すべてのメソッド、オプション、型
-- [高度な使い方](docs/ja/advanced-usage.md) — v1.8 のレジリエンス機能（サーキットブレーカー、可観測性イベント、TCP キープアライブ、自動再接続）を備えたコネクションプール、および MygramDB v1.6/v1.7 の機能（BM25 `_score`、ファジー、ハイライト、ファセット、マルチデータベース、生ブール検索、ランタイム変数、オンデマンド同期）
+- [高度な使い方](docs/ja/advanced-usage.md) — コネクションプールとレジリエンス機能（サーキットブレーカー、可観測性イベント、TCP キープアライブ、自動再接続）、管理コマンドの `AUTH`、エラーコード、および v1.10 までに追加された検索機能（BM25 `_score`、ファジー、ハイライト、ページング可能なファセット、比較フィルタ、ブールクエリモード、マルチデータベース、ランタイム変数、オンデマンド同期）
 
 パッケージレベルの API ドキュメントは
 [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client) にもあります。
@@ -154,6 +160,10 @@ make test-e2e
 # Override the endpoint
 MYGRAM_HOST=db.example.com MYGRAM_PORT=11016 make test-e2e
 
+# Authenticate administrative commands (mandatory from v1.10 on a
+# non-loopback bind)
+MYGRAM_ADMIN_TOKEN=... make test-e2e
+
 # Skip side-effect heavy suites
 MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
 ```
@@ -168,10 +178,11 @@ MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
 `make test-e2e-docker` は使い捨ての **MySQL + MygramDB** スタック（サーバーは
 `ghcr.io/libraz/mygram-db` から取得）を起動し、決定論的なデータセットを投入し、
 `MYGRAM_E2E_SEEDED=1` で e2e スイートを実行してから、すべてを撤去します。ローカル
-サーバーは不要です。ノブ（`MYGRAMDB_VERSION`、`KEEP_UP`、ポート）については
-[`e2e/docker/`](e2e/docker/README.md) を参照してください。`TestE2ESeeded` ブロックは
-正確な結果セット（データベース修飾識別子、フレーズ + 必須フィルタの可視性、日本語
-ngram マッチング、`SearchRaw` の OR、ファセット数）を検証します。
+サーバーは不要です。ノブ（`MYGRAMDB_VERSION`、`MYGRAM_ADMIN_TOKEN`、`KEEP_UP`、
+ポート）については [`e2e/docker/`](e2e/docker/README.md) を参照してください。
+`TestE2ESeeded` ブロックは正確な結果セット（データベース修飾識別子、フレーズ +
+必須フィルタの可視性、日本語 ngram マッチング、`SearchRaw` の OR、ファセット数と
+ページング、比較フィルタ、ブールクエリモード）を検証します。
 
 ## ライセンス
 
