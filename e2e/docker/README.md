@@ -59,6 +59,25 @@ among others:
 The version-agnostic round-trip checks (`SearchRaw`, `SetVariable` /
 `ShowVariables`, `Sync` family) also run without the seed, against any server.
 
+Independent of the seed, the suite asserts the v1.10 protocol surface against
+whatever server it reaches:
+
+- `INFO` readiness (`DataInitialized`, `Readiness`, `Ready()`)
+- the `REPLICATION STATUS` diagnostics — state, CRC errors, schema
+  compatibility, last failure code and the applied-event lag, whose `-1`
+  means no event has been applied rather than a lag of zero
+- an unknown table rejected as a `*ServerError` carrying
+  `ErrCodeTableNotFound`, with the numeric code kept out of the message
+- administrative authentication, when a token is configured: ordinary search
+  needs none, an administrative command without one is refused with
+  `ErrCodePermissionDenied`, `Authenticate` upgrades an already-open
+  connection, a wrong token fails the connect instead of half-opening it, and
+  an administrative command succeeds over a pooled connection
+
+A server the client cannot reach fails the suite here rather than skipping it:
+this harness booted one and waited for it, so skipping every test would exit 0
+and read as a pass.
+
 ## Administrative authentication
 
 From v1.10 the server requires `api.admin_token` because these listeners bind to
