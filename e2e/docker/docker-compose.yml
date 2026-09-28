@@ -51,7 +51,7 @@ services:
       start_period: 30s
 
   mygramdb:
-    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.0}
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.2}
     depends_on:
       mysql:
         condition: service_healthy

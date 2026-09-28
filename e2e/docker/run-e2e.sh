@@ -44,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.10.0})"
+echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.10.2})"
 if ! MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" \
   MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN}" "${COMPOSE[@]}" up -d --wait; then
   echo "ERROR: e2e stack did not come up" >&2

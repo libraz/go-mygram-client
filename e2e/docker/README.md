@@ -29,7 +29,7 @@ adopt that stack's `mysql` service and `down -v` tear it down.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MYGRAMDB_VERSION` | `1.10.0` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.10`, `latest`) |
+| `MYGRAMDB_VERSION` | `1.10.2` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.10`, `latest`) |
 | `MYSQL_VERSION` | `8.4` | MySQL image tag |
 | `MYGRAM_PORT` | `11016` | Host port mapped to the server's TCP API |
 | `MYGRAM_HTTP_PORT` | `18080` | Host port mapped to the server's HTTP/health API |
