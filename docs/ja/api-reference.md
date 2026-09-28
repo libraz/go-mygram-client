@@ -67,7 +67,7 @@ func (c *Client) Facet(table, column string, opts FacetOptions) (*FacetResponse,
 #### Search
 
 `table` の中から `query` に一致するドキュメントを検索します。`table` は素の名前
-でも、MygramDB v1.7 以降のマルチデータベースサーバーでは `database.table` の
+でも、マルチデータベースサーバー（MygramDB 1.7 以降）では `database.table` の
 形式でも指定できます。クエリとオプションは
 [検索式](search-expression.md#search-コマンドの組み立て方) で説明する
 `SEARCH` コマンドにコンパイルされます。
@@ -89,7 +89,7 @@ resp, err := client.Search("articles", "golang tutorial", mygram.SearchOptions{
 `Filters` が表現できるのは等価比較だけです。比較演算子を使う場合は
 `FilterConditions` を、`SearchRaw` が受け付けない型付きオプションと式を
 組み合わせる場合は `QueryMode: mygram.QueryBoolean` を指定します
-（MygramDB v1.9 以降）。
+（MygramDB 1.9 以降）。
 
 ```go
 resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
@@ -105,7 +105,7 @@ resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.Searc
 
 #### SearchRaw
 
-構築済みのブール式をそのまま（引用符なしで）送り（MygramDB v1.8 以降）、
+構築済みのブール式をそのまま（引用符なしで）送り（MygramDB 1.8 以降）、
 サーバーにトークン化させて `AND` / `OR` / `NOT` / 括弧を解釈させます（`AND` の
 下にネストした `OR` グループを含む）。`Search` の AND/NOT 分解では表現できない
 `OR` やグループ化を保つため、
@@ -131,9 +131,9 @@ fmt.Println(cnt.Count)
 #### Facet
 
 フィルタ列の distinct な値を、値ごとのドキュメント数とともに集計します。任意で
-クエリにスコープを絞れます（MygramDB v1.6 以降）。`Limit` と `Offset` で値を
+クエリにスコープを絞れます。`Limit` と `Offset` で値を
 ページングでき、`FacetResponse.TotalCount` はページング前の distinct 値の総数を
-返します（MygramDB v1.9 以降）。
+返します（MygramDB 1.9 以降）。
 [高度な使い方](advanced-usage.md#ファセット) を参照してください。
 
 ### ドキュメントメソッド
@@ -157,7 +157,7 @@ func (c *Client) GetConfig() (string, error)
 ```
 
 `Info` はバージョン、稼働時間、ドキュメント数、テーブル一覧を返し、MygramDB
-v1.10 以降ではレディネスの判定（`ServerInfo.DataInitialized`、
+1.10 以降のサーバーではレディネスの判定（`ServerInfo.DataInitialized`、
 `ServerInfo.Readiness`、`ServerInfo.Ready()`）も返します。`GetConfig` は
 サーバー設定を生の YAML 文字列として返します。
 
@@ -181,7 +181,9 @@ func (c *Client) DisableDebug() error
 デバッグモードを有効にすると、検索とカウントの応答に、クエリごとの所要時間と
 候補数を格納した `Debug *DebugInfo` フィールドが付与されます。
 
-### ランタイム変数（v1.7 以降）
+### ランタイム変数
+
+MygramDB 1.7 以降が必要です。
 
 ```go
 func (c *Client) SetVariable(name, value string) error
@@ -192,7 +194,9 @@ func (c *Client) ShowVariables(likePattern string) (string, error)
 引用符で囲まれます。`ShowVariables` は生の `SHOW VARIABLES [LIKE …]` テーブルを
 返します（`""` を渡すとすべてを一覧します）。
 
-### オンデマンド同期（v1.7 以降）
+### オンデマンド同期
+
+MygramDB 1.7 以降が必要です。
 
 ```go
 func (c *Client) Sync(table string) (string, error)
@@ -283,7 +287,7 @@ type ClientConfig struct {
     AutoReconnect       bool          // reconnect + resend once on a pre-write drop (default false)
     DisableTCPKeepAlive bool          // turn off the SO_KEEPALIVE idle override (default off; keep-alive on)
     TCPKeepAliveIdle    time.Duration // idle before keep-alive probing begins (default 60s)
-    AdminToken          string        // AUTH token replayed on every connection (v1.10+; default none)
+    AdminToken          string        // AUTH token replayed on every connection (MygramDB 1.10+; default none)
 }
 ```
 
@@ -341,11 +345,11 @@ type SearchOptions struct {
     Filters    map[string]string // column filter conditions
     SortColumn string            // sort column; "_score" for BM25 (default primary key)
     SortDesc   bool              // descending order; applies to SortColumn
-    Fuzzy      int               // Levenshtein distance 0/1/2 (v1.6+)
-    Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil (v1.6+)
+    Fuzzy      int               // Levenshtein distance 0/1/2
+    Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil
 
-    FilterConditions []FilterCondition // filters with a comparison operator (v1.9+)
-    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    FilterConditions []FilterCondition // filters with a comparison operator (MygramDB 1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (MygramDB 1.9+)
     SortPrimaryKey   PrimaryKeySort    // primary-key ordering with no sort column
 }
 ```
@@ -438,8 +442,8 @@ type CountOptions struct {
     AndTerms         []string
     NotTerms         []string
     Filters          map[string]string
-    FilterConditions []FilterCondition // comparison filters (v1.9+)
-    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    FilterConditions []FilterCondition // comparison filters (MygramDB 1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (MygramDB 1.9+)
 }
 ```
 
@@ -451,9 +455,9 @@ type FacetOptions struct {
     AndTerms         []string
     NotTerms         []string
     Filters          map[string]string
-    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    FilterConditions []FilterCondition // comparison filters (MygramDB 1.9+)
     Limit            int               // bound the number of (value, count) pairs (0 = no limit)
-    Offset           int               // distinct values to skip (v1.9+)
+    Offset           int               // distinct values to skip (MygramDB 1.9+)
 }
 ```
 
@@ -488,7 +492,7 @@ type FacetValue struct {
 
 type FacetResponse struct {
     Results    []FacetValue // ordered by count descending; one page when Limit/Offset are set
-    TotalCount int64        // distinct values before OFFSET and LIMIT (v1.9+)
+    TotalCount int64        // distinct values before OFFSET and LIMIT (MygramDB 1.9+)
 }
 
 type ServerInfo struct {
@@ -499,8 +503,8 @@ type ServerInfo struct {
     IndexSizeBytes    int
     DocCount          int
     Tables            []string
-    DataInitialized   bool   // initial index state built (v1.10+)
-    Readiness         string // "ready" or "not_ready" (v1.10+); empty on older servers
+    DataInitialized   bool   // initial index state built (MygramDB 1.10+)
+    Readiness         string // "ready" or "not_ready" (MygramDB 1.10+); empty on older servers
 }
 
 func (i *ServerInfo) Ready() bool // Readiness == "ready"
@@ -511,13 +515,13 @@ type ReplicationStatus struct {
     StatusStr               string
     ProcessedEvents         int
     QueueSize               int
-    State                   string    // "running" | "stopped" | "failed" | "not_configured" (v1.10+)
-    CRCErrors               int       // チェックサム検証に失敗した binlog イベント数 (v1.10+)
-    SchemaIncompatible      bool      // MySQL のスキーマが設定と一致せず停止 (v1.10+)
-    LastErrorCode           ErrorCode // 直近の失敗コード。失敗がなければ ErrCodeNone (v1.10+)
-    LastError               string    // LastErrorCode に対応するメッセージ (v1.10+)
-    LastAppliedUnixtime     int64     // 最後にイベントを適用した Unix 時刻 (v1.10+)
-    SecondsSinceLastApplied int64     // レプリケーション遅延。未適用の間は -1 (v1.10+)
+    State                   string    // "running" | "stopped" | "failed" | "not_configured" (MygramDB 1.10+)
+    CRCErrors               int       // チェックサム検証に失敗した binlog イベント数 (MygramDB 1.10+)
+    SchemaIncompatible      bool      // MySQL のスキーマが設定と一致せず停止 (MygramDB 1.10+)
+    LastErrorCode           ErrorCode // 直近の失敗コード。失敗がなければ ErrCodeNone (MygramDB 1.10+)
+    LastError               string    // LastErrorCode に対応するメッセージ (MygramDB 1.10+)
+    LastAppliedUnixtime     int64     // 最後にイベントを適用した Unix 時刻 (MygramDB 1.10+)
+    SecondsSinceLastApplied int64     // レプリケーション遅延。未適用の間は -1 (MygramDB 1.10+)
 }
 
 type DebugInfo struct {
@@ -534,8 +538,8 @@ type DebugInfo struct {
 
 `DumpStatus` と `CacheStats` は、それぞれ `DUMP STATUS` と `CACHE STATS` を
 解析したフィールドを保持します。フィールドの完全な一覧はそれぞれの godoc を
-参照してください。`CacheStats` は v1.10 サーバーが報告するすべてのキーを
-カバーします。ヒット数のカウンタ、ペイロード・無効化インデックス・無効化キュー
+参照してください。`CacheStats` は MygramDB 1.10 以降のサーバーが報告する
+すべてのキーをカバーします。ヒット数のカウンタ、ペイロード・無効化インデックス・無効化キュー
 に分けたメモリ内訳、理由別の登録拒否数、無効化の総数です。古いサーバーが
 出力しないキーはゼロ値のままになります。`AvgHitTimeMs` と `AvgMissTimeMs` が
 `*float64` なのは、対応するカウンタが 0 の間サーバーがこれらを出力しないため
@@ -552,7 +556,7 @@ type DebugInfo struct {
 | `*ProtocolError` | サーバーが不正または予期しない応答を返した |
 | `*TimeoutError` | コマンドが締め切りを超過した。`net.Error` を満たす（`Timeout()` が `true`）。呼び出し側の context の締切が原因の場合は `context.DeadlineExceeded` を wrap する |
 | `*ValidationError` | クライアント側の入力検証に失敗した（制御文字、識別子中のプロトコル区切り文字、長さ超過のクエリ） |
-| `*ServerError` | サーバーが明示的な `ERROR` を返した。MygramDB v1.10 以降では数値の `Code` を伴う |
+| `*ServerError` | サーバーが明示的な `ERROR` を返した。MygramDB 1.10 以降では数値の `Code` を伴う |
 | `*CircuitOpenError` | プールのサーキットブレーカーが開いている（または試行が実行中のハーフオープン）。ネットワークに触れず送出され、呼び出し側は素早く失敗する。ネットワーク障害には分類されないため、これ自体がブレーカーを駆動することはない |
 
 ```go
@@ -567,7 +571,7 @@ type ConnectionError struct {
 
 ### サーバーのエラーコード
 
-MygramDB v1.10 以降、すべての `ERROR` フレームは `ERROR <code> <message>` の形
+MygramDB 1.10 以降では、すべての `ERROR` フレームは `ERROR <code> <message>` の形
 を取り、コードは `ServerError.Code` に解析されます。それより古いサーバーは
 コードなしのフレームを送り、その場合は `ErrCodeNone` として報告されます。
 つまり「コードなし」と実際のコードは、メッセージ本文から推測せずに区別できます。
@@ -577,7 +581,7 @@ type ErrorCode uint16
 
 type ServerError struct {
     Message string    // the frame's message, without the code prefix
-    Code    ErrorCode // ErrCodeNone on a pre-v1.10 server
+    Code    ErrorCode // ErrCodeNone on a server older than MygramDB 1.10
 }
 
 func (e *ServerError) Retryable() bool
@@ -614,7 +618,9 @@ func ToQueryString(expr *SearchExpression) string
 
 詳細と例は [検索式](search-expression.md) を参照してください。
 
-## テーブル識別子のヘルパー（v1.7 以降）
+## テーブル識別子のヘルパー
+
+MygramDB 1.7 以降が必要です。
 
 ```go
 func QualifyTableIdentity(table, database string) (string, error)

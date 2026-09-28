@@ -22,6 +22,13 @@ Expressions may combine these, for example:
 +golang +(tutorial OR guide) -deprecated "best practices"
 ```
 
+![The web-syntax input golang "machine learning" -php +(tutorial OR guide) split into four terms and joined into the server query golang AND "machine learning" AND (tutorial OR guide) AND NOT php.](../images/search-expression.svg)
+
+```go
+mygram.ConvertSearchExpression(`golang "machine learning" -php +(tutorial OR guide)`)
+// `golang AND "machine learning" AND (tutorial OR guide) AND NOT php`
+```
+
 ## Functions
 
 ### SimplifySearchExpression

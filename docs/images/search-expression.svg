@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="fig-title fig-desc">
+<title id="fig-title">Converting a web-syntax search expression</title>
+<desc id="fig-desc">ConvertSearchExpression() splits the input golang &quot;machine learning&quot; -php +(tutorial OR guide) into four terms. The unprefixed term golang is required and joined with AND. The phrase machine learning contains a space, so it is sent quoted. The required group +(tutorial OR guide) keeps its OR inside parentheses. The excluded term -php becomes AND NOT php. The resulting server query is golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php, which is sent as a boolean expression: send with SearchRaw, or Search with QueryMode: QueryBoolean.</desc>
+<style>
+  .bg{fill:#f8fafc} .grp{fill:#eef2f6} .chip{fill:#ffffff;stroke:#cbd5e1;stroke-width:1}
+  .card{fill:#ffffff;stroke:#1d4ed8;stroke-width:1.4} .alt{fill:#ffffff;stroke:#c2410c;stroke-width:1.4}
+  .seam{fill:none;stroke:#cbd5e1;stroke-width:1;stroke-dasharray:3 3}
+  .ln{fill:none;stroke:#1d4ed8;stroke-width:1.4} .ah{fill:#1d4ed8}
+  .ln2{fill:none;stroke:#c2410c;stroke-width:1.4} .ah2{fill:#c2410c}
+  .lnd{fill:none;stroke:#1d4ed8;stroke-width:1.4;stroke-dasharray:5 4}
+  text{font-family:"IBM Plex Sans","Hiragino Sans","Noto Sans JP","Segoe UI",sans-serif;fill:#334155}
+  .h{font-size:12.5px;fill:#0f172a} .hb{font-size:12.5px;font-weight:600;fill:#0f172a}
+  .lbl{font-size:11px;font-weight:600;letter-spacing:.06em;fill:#64748b}
+  .s{font-size:10.5px;fill:#64748b}
+  .mono{font-family:"IBM Plex Mono","SF Mono",Menlo,Consolas,monospace;font-size:11px;fill:#0f172a}
+  @media (prefers-color-scheme: dark){
+    .bg{fill:#0d1117} .grp{fill:#161b22} .chip{fill:#1c2128;stroke:#3a4a63}
+    .card{fill:#1c2128;stroke:#60a5fa} .alt{fill:#1c2128;stroke:#fb923c}
+    .seam{stroke:#3a4a63}
+    .ln{stroke:#60a5fa} .ah{fill:#60a5fa} .ln2{stroke:#fb923c} .ah2{fill:#fb923c} .lnd{stroke:#60a5fa}
+    text{fill:#cbd5e1} .h,.hb,.mono{fill:#e8eefb} .lbl,.s{fill:#94a3b8}
+  }
+</style>
+<rect class="bg" x="0" y="0" width="960" height="360" rx="10"/>
+<rect class="alt" x="180" y="24" width="600" height="54" rx="8"/>
+<rect class="chip" x="24" y="124" width="213" height="100" rx="6"/>
+<path class="seam" d="M36 196 H225"/>
+<rect class="chip" x="257" y="124" width="213" height="100" rx="6"/>
+<path class="seam" d="M269 196 H458"/>
+<rect class="chip" x="490" y="124" width="213" height="100" rx="6"/>
+<path class="seam" d="M502 196 H691"/>
+<rect class="chip" x="723" y="124" width="213" height="100" rx="6"/>
+<path class="seam" d="M735 196 H924"/>
+<rect class="card" x="24" y="252" width="912" height="64" rx="8"/>
+<path class="ln" d="M480 78 V104"/>
+<path class="ln" d="M130 104 H829"/>
+<path class="ln" d="M130 104 V117"/>
+<polygon class="ah" points="130,124 126,117 134,117"/>
+<path class="ln" d="M130 224 V245"/>
+<polygon class="ah" points="130,252 126,245 134,245"/>
+<path class="ln" d="M363 104 V117"/>
+<polygon class="ah" points="363,124 359,117 367,117"/>
+<path class="ln" d="M363 224 V245"/>
+<polygon class="ah" points="363,252 359,245 367,245"/>
+<path class="ln" d="M596 104 V117"/>
+<polygon class="ah" points="596,124 592,117 600,117"/>
+<path class="ln" d="M596 224 V245"/>
+<polygon class="ah" points="596,252 592,245 600,245"/>
+<path class="ln" d="M829 104 V117"/>
+<polygon class="ah" points="829,124 825,117 833,117"/>
+<path class="ln" d="M829 224 V245"/>
+<polygon class="ah" points="829,252 825,245 833,245"/>
+<text class="lbl" x="194" y="43">USER INPUT · WEB SYNTAX</text>
+<text class="mono" x="194" y="66">golang "machine learning" -php +(tutorial OR guide)</text>
+<text class="mono" x="490" y="96">ConvertSearchExpression()</text>
+<text class="mono" x="36" y="146">golang</text>
+<text class="hb" x="36" y="168">Unprefixed term</text>
+<text class="s" x="36" y="185">required, joined with AND</text>
+<text class="mono" x="36" y="214">golang</text>
+<text class="mono" x="269" y="146">"machine learning"</text>
+<text class="hb" x="269" y="168">Phrase</text>
+<text class="s" x="269" y="185">contains a space, so quoted</text>
+<text class="mono" x="269" y="214">"machine learning"</text>
+<text class="mono" x="502" y="146">+(tutorial OR guide)</text>
+<text class="hb" x="502" y="168">Required group</text>
+<text class="s" x="502" y="185">OR stays in parentheses</text>
+<text class="mono" x="502" y="214">(tutorial OR guide)</text>
+<text class="mono" x="735" y="146">-php</text>
+<text class="hb" x="735" y="168">Excluded term</text>
+<text class="s" x="735" y="185">joined with AND NOT</text>
+<text class="mono" x="735" y="214">AND NOT php</text>
+<text class="lbl" x="38" y="272">SERVER QUERY</text>
+<text class="mono" x="38" y="298">golang AND "machine learning" AND (tutorial OR guide) AND NOT php</text>
+<text class="s" x="922" y="298" text-anchor="end">send with SearchRaw, or Search with QueryMode: QueryBoolean</text>
+<text class="s" x="480" y="342" text-anchor="middle">Every term is joined with AND; a term that is empty, a reserved word, or contains whitespace or quotes is sent quoted.</text>
+</svg>

@@ -23,6 +23,13 @@ term やクエリ文字列に変換するパーサーが同梱されています
 +golang +(tutorial OR guide) -deprecated "best practices"
 ```
 
+![Web 形式の入力 golang "machine learning" -php +(tutorial OR guide) を 4 つの項に分け、サーバーへ送るクエリ golang AND "machine learning" AND (tutorial OR guide) AND NOT php に組み立てる過程を示した図です。](../images/search-expression-ja.svg)
+
+```go
+mygram.ConvertSearchExpression(`golang "machine learning" -php +(tutorial OR guide)`)
+// `golang AND "machine learning" AND (tutorial OR guide) AND NOT php`
+```
+
 ## 関数
 
 ### SimplifySearchExpression

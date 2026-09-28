@@ -3,10 +3,12 @@
 このガイドでは、MygramDB サーバーへの接続と、`go-mygram-client` を使った
 最初のクエリの実行までを順に説明します。
 
+![検索の呼び出しがアプリケーションからクライアントの検証とクォート処理を経て TCP で MygramDB サーバーに届き、応答がデコードされて戻る流れと、MySQL が binlog レプリケーションでサーバーを更新する関係を示した図です。](../images/request-path-ja.svg)
+
 ## 前提条件
 
 - Go 1.26 以降
-- 稼働中の MygramDB サーバー（v1.10 を推奨。v1.6 〜 v1.9 も利用可）
+- 稼働中の MygramDB サーバー
 
 ## インストール
 
@@ -159,8 +161,8 @@ if err != nil {
     case errors.As(err, &valErr):
         log.Println("invalid input:", valErr)
     case errors.As(err, &srvErr):
-        // srvErr.Code は MygramDB v1.10 以降でのサーバーの数値エラーコード
-        // （それより古いサーバーでは ErrCodeNone）。
+        // srvErr.Code はサーバーの数値エラーコード（MygramDB 1.10 以降）。
+        // それより古いサーバーでは ErrCodeNone。
         log.Println("server returned an error:", srvErr)
     case errors.As(err, &protoErr):
         log.Println("protocol error:", protoErr)
@@ -170,8 +172,8 @@ if err != nil {
 }
 ```
 
-エラー型の一覧は [API リファレンス](api-reference.md#エラー型) を、MygramDB
-v1.10 以降がすべての `ERROR` フレームに付与する数値コードについては
+エラー型の一覧は [API リファレンス](api-reference.md#エラー型) を、サーバーが
+すべての `ERROR` フレームに付与する数値コード（MygramDB 1.10 以降）については
 [サーバーのエラーコード](api-reference.md#サーバーのエラーコード) を参照して
 ください。
 
@@ -191,7 +193,9 @@ if errors.Is(err, context.DeadlineExceeded) { /* ctx の締切が原因 */ }
 - [検索式](search-expression.md) — Web スタイルの検索入力を解析する
 - [高度な使い方](advanced-usage.md) — コネクションプール、耐障害性機能
   （サーキットブレーカー、可観測性、TCP キープアライブ、自動再接続）、管理コマンド
-  の `AUTH`、エラーコード、v1.6 〜 v1.10 の検索機能、本番環境向けのパターン
+  の `AUTH`、エラーコード、検索機能（BM25 関連度、ファジーマッチ、ハイライト、
+  ファセット、比較フィルタ、ブールクエリモード、生ブール検索）、マルチデータベース
+  テーブル、本番環境向けのパターン
 
 ## トラブルシューティング
 

@@ -1,7 +1,7 @@
 # 高度な使い方
 
-本番環境向けのパターン、コネクションプール、および MygramDB v1.6/v1.7 の機能群
-について説明します。
+本番環境向けのパターン、コネクションプール、検索機能、管理コマンドについて
+説明します。
 
 ## コネクションプール
 
@@ -70,11 +70,11 @@ if errors.Is(err, context.DeadlineExceeded) {
   実行されないようにします。
 - **接続確立の失敗**（サーバーが一時的に到達不能な場合）は、まだ何も送信して
   いないため、どのコマンドでも再試行されます。
-- **一過性のサーバー拒否** — MygramDB v1.10 以降の `ErrCodeServerLoading`
-  （6028）、`ErrCodeServerNotReady`（6029）、`ErrCodeServerBusy`（6030）— は、
-  どのコマンドでも再試行されます。サーバーは実行**前**にこれらを返すため、再送
-  しても二重に適用されることはありません。判定はメッセージ本文の照合ではなく、
-  数値コードに基づきます。
+- **一過性のサーバー拒否** — `ErrCodeServerLoading`（6028）、
+  `ErrCodeServerNotReady`（6029）、`ErrCodeServerBusy`（6030）（MygramDB 1.10
+  以降）— は、どのコマンドでも再試行されます。サーバーは実行**前**にこれらを
+  返すため、再送しても二重に適用されることはありません。判定はメッセージ本文の
+  照合ではなく、数値コードに基づきます。
 - それ以外のサーバーエラー、検証エラー、タイムアウトは決してリトライされません。
 
 リトライ方針は設定可能です。
@@ -139,7 +139,7 @@ open でも `WithConn` の呼び出しを即時失敗させません。借用し
 
 ### 管理コマンドの認証
 
-`api.admin_token` を設定した MygramDB v1.10 以降のサーバー（TCP リスナーが
+`api.admin_token` を設定した MygramDB サーバー（1.10 以降。TCP リスナーが
 ループバック以外にバインドする場合は必須）は、`DUMP`、`SYNC`、`REPLICATION`、
 `CONFIG`、`CACHE`、`OPTIMIZE`、`DEBUG`、`SET`、`SHOW VARIABLES` を `AUTH` の
 背後に置きます。この許可は接続ごとなので、すべてのソケットで送り直す必要が
@@ -307,7 +307,7 @@ func healthy(ctx context.Context, c *mygram.Client) (bool, error) {
 }
 ```
 
-## MygramDB v1.6 の機能
+## 検索機能
 
 ### BM25 関連度スコアリング
 
@@ -374,9 +374,9 @@ for _, v := range resp.Results {
 }
 ```
 
-MygramDB v1.9 以降では `Limit` と `Offset` でファセットをページングでき、
-`TotalCount` がページング前の distinct 値の総数を返します。ページネーションの
-サイズを決めるにはこれが必要です。
+`Limit` と `Offset` でファセットをページングでき、`TotalCount` がページング前の
+distinct 値の総数を返します（MygramDB 1.9 以降）。ページネーションのサイズを
+決めるにはこれが必要です。
 
 ```go
 page, _ := client.Facet("articles", "category", mygram.FacetOptions{
@@ -389,62 +389,13 @@ fmt.Printf("showing %d of %d categories\n", len(page.Results), page.TotalCount)
 それより古いサーバーはページのサイズしか返さないため、そこでは `TotalCount` は
 `len(Results)` と等しくなります。
 
-## MygramDB v1.7 の機能
-
-### データベース修飾されたテーブル識別子
-
-単一の MygramDB インスタンスは、異なるデータベースにある同名のテーブルを
-インデックス化できます。テーブルは `database.table`（例: `app_db.articles`）
-として参照します。単一データベースのサーバーでは素の名前も引き続き機能します。
-
-```go
-resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
-
-// Build / parse identities explicitly when needed:
-id, _ := mygram.QualifyTableIdentity("articles", "app_db")  // "app_db.articles"
-db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articles"
-```
-
-### 生ブール検索
-
-`Search` は AND/NOT 句に分解しますが、これでは `OR` やグループ化を表現できません。
-`SearchRaw` は構築済みのブール式をそのまま（引用符なしで）送り、サーバーに
-トークン化させて `AND` / `OR` / `NOT` / 括弧を解析させます。`AND` の下に
-ネストした `OR` グループも解釈されます（MygramDB v1.8 以降）。
-`ConvertSearchExpression` と組み合わせて使います。
-
-```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
-resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
-
-// Snippet-returning variant:
-resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
-```
-
-### ランタイム変数
-
-```go
-_ = client.SetVariable("logging.level", "debug")
-out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
-```
-
-### オンデマンド同期
-
-```go
-_, _ = client.Sync("articles")     // start a full reload of one table
-status, _ := client.SyncStatus()   // raw SYNC_STATUS report
-_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
-```
-
-## MygramDB v1.9 の機能
-
 ### 比較フィルタ
 
 `Filters` が表現できるのは等価比較だけです。`FilterConditions` はサーバーが
 受け付ける比較演算子（`=`、`!=`、`>`、`>=`、`<`、`<=`）を追加し、両方の形式を
-1 つのリクエストで併用できます。マップのエントリはキーのソート順、条件はスライス
-の順で送られるため、同じオプションからは常に同じコマンドが生成されます
-（サーバーのクエリキャッシュにとって重要です）。
+1 つのリクエストで併用できます（MygramDB 1.9 以降）。マップのエントリはキーの
+ソート順、条件はスライスの順で送られるため、同じオプションからは常に同じ
+コマンドが生成されます（サーバーのクエリキャッシュにとって重要です）。
 
 ```go
 resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
@@ -464,8 +415,9 @@ resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
 `Search` はテキストをリテラルなユーザー入力として扱い、トークンを引用符で
 囲みます。そのため `AND` や `LIMIT` を検索すると、句の開始ではなくその語その
 ものが検索されます。`QueryMode: mygram.QueryBoolean` を指定すると、テキストは
-そのまま送られ、サーバーの式パーサーが `AND` / `OR` / `NOT` と括弧を演算子と
-して解釈します。しかも `SearchRaw` では使えない型付きオプションを併用できます。
+そのまま送られ（MygramDB 1.9 以降）、サーバーの式パーサーが `AND` / `OR` /
+`NOT` と括弧を演算子として解釈します。しかも `SearchRaw` では使えない型付き
+オプションを併用できます。
 
 ```go
 resp, _ := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
@@ -496,12 +448,60 @@ resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
 ソート列と主キー順を同時に指定した場合はクライアント側で拒否されます。1 つの
 リクエストが持てる `SORT` 句は 1 つだけだからです。
 
-## MygramDB v1.10 の機能
+### 生ブール検索
 
-### レディネス
+`Search` は AND/NOT 句に分解しますが、これでは `OR` やグループ化を表現できません。
+`SearchRaw` は構築済みのブール式をそのまま（引用符なしで）送り、サーバーに
+トークン化させて `AND` / `OR` / `NOT` / 括弧を解析させます。`AND` の下に
+ネストした `OR` グループも解釈されます（MygramDB 1.8 以降）。
+`ConvertSearchExpression` と組み合わせて使います。
+
+```go
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
+resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
+
+// Snippet-returning variant:
+resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
+```
+
+## マルチデータベーステーブル
+
+単一の MygramDB インスタンスは、異なるデータベースにある同名のテーブルを
+インデックス化できます（MygramDB 1.7 以降）。テーブルは `database.table`
+（例: `app_db.articles`）として参照します。単一データベースのサーバーでは
+素の名前も引き続き機能します。
+
+```go
+resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
+
+// Build / parse identities explicitly when needed:
+id, _ := mygram.QualifyTableIdentity("articles", "app_db")  // "app_db.articles"
+db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articles"
+```
+
+## ランタイム変数
+
+MygramDB 1.7 以降が必要です。
+
+```go
+_ = client.SetVariable("logging.level", "debug")
+out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
+```
+
+## オンデマンド同期
+
+MygramDB 1.7 以降が必要です。
+
+```go
+_, _ = client.Sync("articles")     // start a full reload of one table
+status, _ := client.SyncStatus()   // raw SYNC_STATUS report
+_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
+```
+
+## レディネス
 
 `INFO` は、HTTP のレディネスエンドポイントと同じ入力から評価した、サーバーの
-状態構築が完了しているかどうかを返します。
+状態構築が完了しているかどうかを返します（MygramDB 1.10 以降）。
 
 ```go
 info, _ := client.Info()
@@ -512,13 +512,13 @@ if !info.Ready() {
 ```
 
 どちらのフィールドも古いサーバーには存在せず、その場合 `Readiness` は空、
-`Ready()` は false になります。したがって、MygramDB v1.10 以降の配備だと
+`Ready()` は false になります。したがって、MygramDB 1.10 以降の配備だと
 分かっている場合にのみ、これでトラフィックを制御してください。
 
-### エラーコード
+## エラーコード
 
 すべての `ERROR` フレームは数値コードを伴い、`ServerError.Code` として公開され
-ます。
+ます（MygramDB 1.10 以降）。
 
 ```go
 if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
@@ -529,8 +529,9 @@ if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
 ```
 
 プールも同じコードで何を再試行するかを決めます（[リトライの意味論](#リトライの意味論)
-を参照）。v1.10 より前のサーバーからのコードなしフレームは `ErrCodeNone` として
-報告され、メッセージ本文は信頼できる手がかりではないため、決して再試行されません。
+を参照）。MygramDB 1.10 より前のサーバーからのコードなしフレームは `ErrCodeNone`
+として報告され、メッセージ本文は信頼できる手がかりではないため、決して再試行
+されません。
 
 ## 永続化とキャッシュの管理
 

@@ -65,9 +65,9 @@ func (c *Client) Facet(table, column string, opts FacetOptions) (*FacetResponse,
 
 #### Search
 
-Searches `table` for documents matching `query`. `table` may be a bare name or,
-on a MygramDB v1.7+ multi-database server, a `database.table` identity. The
-query and options compile to a `SEARCH` command as described in
+Searches `table` for documents matching `query`. `table` may be a bare name
+or, on a multi-database server (MygramDB 1.7 or later), a `database.table`
+identity. The query and options compile to a `SEARCH` command as described in
 [Search Expressions](search-expression.md#how-the-search-command-is-built).
 
 ```go
@@ -86,7 +86,7 @@ returning snippets in `SearchResult.Snippet`.
 
 `Filters` expresses equality only. For a comparison, use `FilterConditions`,
 and set `QueryMode: mygram.QueryBoolean` to combine an expression with typed
-options that `SearchRaw` does not accept (MygramDB v1.9+):
+options that `SearchRaw` does not accept (MygramDB 1.9 or later):
 
 ```go
 resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
@@ -102,9 +102,9 @@ resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.Searc
 
 #### SearchRaw
 
-Sends a pre-built boolean expression verbatim, unquoted (MygramDB v1.8+), so the
-server tokenizes it and its parser interprets `AND` / `OR` / `NOT` / parentheses,
-including `OR` groups nested under `AND`. Pair it with
+Sends a pre-built boolean expression verbatim, unquoted (MygramDB 1.8 or
+later), so the server tokenizes it and its parser interprets `AND` / `OR` /
+`NOT` / parentheses, including `OR` groups nested under `AND`. Pair it with
 [`ConvertSearchExpression`](#search-expression-functions) to preserve `OR` and
 grouping that `Search`'s AND/NOT decomposition cannot express.
 `SearchRawWithHighlights` adds the `HIGHLIGHT` clause.
@@ -128,9 +128,9 @@ fmt.Println(cnt.Count)
 #### Facet
 
 Aggregates distinct values of a filter column with per-value document counts,
-optionally scoped to a query (MygramDB v1.6+). `Limit` and `Offset` page
-through the values, and `FacetResponse.TotalCount` reports how many distinct
-values exist before paging (MygramDB v1.9+). See
+optionally scoped to a query. `Limit` and `Offset` page through the values,
+and `FacetResponse.TotalCount` reports how many distinct values exist before
+paging (MygramDB 1.9 or later). See
 [Advanced Usage](advanced-usage.md#facets).
 
 ### Document Methods
@@ -154,10 +154,10 @@ func (c *Client) Info() (*ServerInfo, error)
 func (c *Client) GetConfig() (string, error)
 ```
 
-`Info` returns version, uptime, document count, the table list, and — on
-MygramDB v1.10+ — the readiness verdict (`ServerInfo.DataInitialized`,
-`ServerInfo.Readiness`, `ServerInfo.Ready()`). `GetConfig` returns the server
-configuration as a raw YAML string.
+`Info` returns version, uptime, document count, the table list, and — on a
+server running MygramDB 1.10 or later — the readiness verdict
+(`ServerInfo.DataInitialized`, `ServerInfo.Readiness`, `ServerInfo.Ready()`).
+`GetConfig` returns the server configuration as a raw YAML string.
 
 ### Replication
 
@@ -179,7 +179,9 @@ func (c *Client) DisableDebug() error
 When debug mode is enabled, search and count responses carry a populated
 `Debug *DebugInfo` field with per-query timing and candidate counts.
 
-### Runtime Variables (v1.7+)
+### Runtime Variables
+
+Requires MygramDB 1.7 or later.
 
 ```go
 func (c *Client) SetVariable(name, value string) error
@@ -190,7 +192,9 @@ func (c *Client) ShowVariables(likePattern string) (string, error)
 quoted automatically. `ShowVariables` returns the raw `SHOW VARIABLES [LIKE …]`
 table (pass `""` to list everything).
 
-### On-demand Sync (v1.7+)
+### On-demand Sync
+
+Requires MygramDB 1.7 or later.
 
 ```go
 func (c *Client) Sync(table string) (string, error)
@@ -282,7 +286,7 @@ type ClientConfig struct {
     AutoReconnect       bool          // reconnect + resend once on a pre-write drop (default false)
     DisableTCPKeepAlive bool          // turn off the SO_KEEPALIVE idle override (default off; keep-alive on)
     TCPKeepAliveIdle    time.Duration // idle before keep-alive probing begins (default 60s)
-    AdminToken          string        // AUTH token replayed on every connection (v1.10+; default none)
+    AdminToken          string        // AUTH token replayed on every connection (MygramDB 1.10+; default none)
 }
 ```
 
@@ -339,11 +343,11 @@ type SearchOptions struct {
     Filters    map[string]string // column filter conditions
     SortColumn string            // sort column; "_score" for BM25 (default primary key)
     SortDesc   bool              // descending order; applies to SortColumn
-    Fuzzy      int               // Levenshtein distance 0/1/2 (v1.6+)
-    Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil (v1.6+)
+    Fuzzy      int               // Levenshtein distance 0/1/2
+    Highlight  *HighlightOptions // enable HIGHLIGHT when non-nil
 
-    FilterConditions []FilterCondition // filters with a comparison operator (v1.9+)
-    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    FilterConditions []FilterCondition // filters with a comparison operator (MygramDB 1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (MygramDB 1.9+)
     SortPrimaryKey   PrimaryKeySort    // primary-key ordering with no sort column
 }
 ```
@@ -437,8 +441,8 @@ type CountOptions struct {
     AndTerms         []string
     NotTerms         []string
     Filters          map[string]string
-    FilterConditions []FilterCondition // comparison filters (v1.9+)
-    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (v1.9+)
+    FilterConditions []FilterCondition // comparison filters (MygramDB 1.9+)
+    QueryMode        QueryMode         // QueryLiteral (default) or QueryBoolean (MygramDB 1.9+)
 }
 ```
 
@@ -450,9 +454,9 @@ type FacetOptions struct {
     AndTerms         []string
     NotTerms         []string
     Filters          map[string]string
-    FilterConditions []FilterCondition // comparison filters (v1.9+)
+    FilterConditions []FilterCondition // comparison filters (MygramDB 1.9+)
     Limit            int               // bound the number of (value, count) pairs (0 = no limit)
-    Offset           int               // distinct values to skip (v1.9+)
+    Offset           int               // distinct values to skip (MygramDB 1.9+)
 }
 ```
 
@@ -487,7 +491,7 @@ type FacetValue struct {
 
 type FacetResponse struct {
     Results    []FacetValue // ordered by count descending; one page when Limit/Offset are set
-    TotalCount int64        // distinct values before OFFSET and LIMIT (v1.9+)
+    TotalCount int64        // distinct values before OFFSET and LIMIT (MygramDB 1.9+)
 }
 
 type ServerInfo struct {
@@ -498,8 +502,8 @@ type ServerInfo struct {
     IndexSizeBytes    int
     DocCount          int
     Tables            []string
-    DataInitialized   bool   // initial index state built (v1.10+)
-    Readiness         string // "ready" or "not_ready" (v1.10+); empty on older servers
+    DataInitialized   bool   // initial index state built (MygramDB 1.10+)
+    Readiness         string // "ready" or "not_ready" (MygramDB 1.10+); empty on older servers
 }
 
 func (i *ServerInfo) Ready() bool // Readiness == "ready"
@@ -510,13 +514,13 @@ type ReplicationStatus struct {
     StatusStr               string
     ProcessedEvents         int
     QueueSize               int
-    State                   string    // "running" | "stopped" | "failed" | "not_configured" (v1.10+)
-    CRCErrors               int       // binlog events whose checksum did not verify (v1.10+)
-    SchemaIncompatible      bool      // stopped because MySQL no longer matches the config (v1.10+)
-    LastErrorCode           ErrorCode // last failure, ErrCodeNone when none (v1.10+)
-    LastError               string    // message for LastErrorCode (v1.10+)
-    LastAppliedUnixtime     int64     // when the last event was applied (v1.10+)
-    SecondsSinceLastApplied int64     // replication lag; -1 until an event is applied (v1.10+)
+    State                   string    // "running" | "stopped" | "failed" | "not_configured" (MygramDB 1.10+)
+    CRCErrors               int       // binlog events whose checksum did not verify (MygramDB 1.10+)
+    SchemaIncompatible      bool      // stopped because MySQL no longer matches the config (MygramDB 1.10+)
+    LastErrorCode           ErrorCode // last failure, ErrCodeNone when none (MygramDB 1.10+)
+    LastError               string    // message for LastErrorCode (MygramDB 1.10+)
+    LastAppliedUnixtime     int64     // when the last event was applied (MygramDB 1.10+)
+    SecondsSinceLastApplied int64     // replication lag; -1 until an event is applied (MygramDB 1.10+)
 }
 
 type DebugInfo struct {
@@ -533,12 +537,12 @@ type DebugInfo struct {
 
 `DumpStatus` and `CacheStats` carry the parsed fields of `DUMP STATUS` and
 `CACHE STATS` respectively; see their godoc for the full field list.
-`CacheStats` covers every key the v1.10 server reports — hit counters, the
-memory split between payloads, the invalidation index and the invalidation
-queue, admission rejections by reason, and invalidation totals. A key an older
-server omits keeps its zero value. `AvgHitTimeMs` and `AvgMissTimeMs` are
-`*float64` because the server omits them entirely while the matching counter is
-zero, which a plain `0` could not distinguish.
+`CacheStats` covers every key a MygramDB 1.10 or later server reports — hit
+counters, the memory split between payloads, the invalidation index and the
+invalidation queue, admission rejections by reason, and invalidation totals. A
+key an older server omits keeps its zero value. `AvgHitTimeMs` and
+`AvgMissTimeMs` are `*float64` because the server omits them entirely while
+the matching counter is zero, which a plain `0` could not distinguish.
 
 ## Error Types
 
@@ -551,7 +555,7 @@ All command methods return one of these concrete types, matchable with
 | `*ProtocolError` | Server returned a malformed or unexpected response |
 | `*TimeoutError` | The command exceeded its deadline. Satisfies `net.Error` (`Timeout()` is `true`); wraps `context.DeadlineExceeded` when the caller's context deadline was the cause |
 | `*ValidationError` | Client-side input validation failed (control characters, protocol delimiters in an identifier, over-length query) |
-| `*ServerError` | Server replied with an explicit `ERROR`, carrying a numeric `Code` on MygramDB v1.10+ |
+| `*ServerError` | Server replied with an explicit `ERROR`, carrying a numeric `Code` on MygramDB 1.10 or later |
 | `*CircuitOpenError` | The pool's circuit breaker is open (or half-open with a trial in flight); raised without touching the network so the caller fails fast. Not classified as a network failure, so it does not itself drive the breaker |
 
 ```go
@@ -566,17 +570,17 @@ checks reach the underlying cause.
 
 ### Server error codes
 
-From MygramDB v1.10 every `ERROR` frame is `ERROR <code> <message>`, and the
-code is parsed into `ServerError.Code`. An older server sends an uncoded frame,
-which is reported as `ErrCodeNone` — so "no code" is distinguishable from a real
-code rather than guessed at from the message text.
+On MygramDB 1.10 or later, every `ERROR` frame is `ERROR <code> <message>`,
+and the code is parsed into `ServerError.Code`. An older server sends an
+uncoded frame, which is reported as `ErrCodeNone` — so "no code" is
+distinguishable from a real code rather than guessed at from the message text.
 
 ```go
 type ErrorCode uint16
 
 type ServerError struct {
     Message string    // the frame's message, without the code prefix
-    Code    ErrorCode // ErrCodeNone on a pre-v1.10 server
+    Code    ErrorCode // ErrCodeNone on a server older than MygramDB 1.10
 }
 
 func (e *ServerError) Retryable() bool
@@ -612,7 +616,9 @@ func ToQueryString(expr *SearchExpression) string
 
 See [Search Expressions](search-expression.md) for details and examples.
 
-## Table Identity Helpers (v1.7+)
+## Table Identity Helpers
+
+Requires MygramDB 1.7 or later.
 
 ```go
 func QualifyTableIdentity(table, database string) (string, error)

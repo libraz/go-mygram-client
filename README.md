@@ -2,44 +2,17 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/go-mygram-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/go-mygram-client/actions)
 [![Go Reference](https://pkg.go.dev/badge/github.com/libraz/go-mygram-client.svg)](https://pkg.go.dev/github.com/libraz/go-mygram-client)
-[![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![codecov](https://codecov.io/gh/libraz/go-mygram-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/go-mygram-client)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)
+[![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ACD7?logo=go)](https://golangci-lint.run/)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://pkg.go.dev/github.com/libraz/go-mygram-client?tab=imports)
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-Compatible with MygramDB v1.10.2 (administrative `AUTH`, numeric error codes with
-code-driven retries, readiness in `INFO`, the full `CACHE STATS` surface,
-separate budgets for long-running commands), v1.9 (typed comparison filters,
-boolean query mode, paginated facets, primary-key ordering), v1.8 (unquoted raw boolean transport with
-OR groups nested under AND, date-only filter values), v1.7 (database-qualified
-tables, raw boolean search, runtime variables, on-demand sync), and v1.6 (BM25
-scoring, HIGHLIGHT, FUZZY, FACET). Older servers stay supported: features the
-server does not implement are simply not requested, and an uncoded `ERROR` frame
-is reported without a code.
+**Server compatibility:** MygramDB 1.6 or later, with the protocol implemented through 1.10.2. A server rejects options it predates, and an older server's `ERROR` frames carry no numeric code; the [API reference](https://github.com/libraz/go-mygram-client/blob/main/docs/en/api-reference.md) marks each option that needs a newer server.
 
-## MygramDB v1.10.2
-
-- **One quoting rule for every wire-bound string** — search terms, filter
-  values, AND/NOT terms, highlight tags and primary keys are all quoted by
-  the same decision: empty, a clause keyword (case-insensitive), ASCII or
-  Unicode whitespace, a control character, a quote, a backslash, or a
-  parenthesis. Callers always pass raw, unquoted text; a highlight tag that
-  needs quoting is quoted rather than rejected. See
-  [Search Expressions](docs/en/search-expression.md#notes) for the exact rule.
-- **Quoted primary keys and `GET` string values are decoded** on the way
-  back, so a `SEARCH` or `GET` result whose primary key or a string field
-  contains a space round-trips intact instead of being split.
-- **IPv6 servers are reachable** by a literal address (`"[::1]:11016"`) or a
-  hostname that resolves only to an AAAA record.
-- **Multi-line `HIGHLIGHT`, `DEBUG` and `SHOW VARIABLES` responses are read
-  completely**, even when a chunk boundary lands exactly at the header line
-  a single-line reply would also end at.
-- **`SimplifySearchExpression` rejects an `OR` or grouped expression**
-  instead of silently misrepresenting it as a single main term. Use
-  `ConvertSearchExpression` with `SearchRaw` for that case.
+<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/request-path.svg" alt="A search call passing from the application through the client's validation and wire-quoting steps to the MygramDB server over TCP, with the response decoded on the way back and MySQL feeding the server through binlog replication." width="960">
 
 ## Overview
 
@@ -63,7 +36,7 @@ MygramDB answers full-text queries from memory instead of an on-disk MySQL FULLT
 - **Thread Safe** — Safe for concurrent use
 - **Connection Pooling** — Bounded `Pool` with reconnection and retry for high-throughput workloads
 - **Resilience** — Pool circuit breaker, observability events, TCP keep-alive, and client-level auto-reconnect
-- **Administrative AUTH** — A configured token is replayed on every connection, including reconnects and pooled sockets
+- **IPv4 and IPv6** — Connects to IPv6 literals (`"[::1]:11016"`) and to hostnames that resolve only to an AAAA record
 
 ## Installation
 
@@ -140,18 +113,259 @@ resp, err := pool.Search("articles", "hello", mygram.SearchOptions{Limit: 100})
 
 When every connection is busy, a call blocks until one is returned or its
 `context` is canceled — a natural backpressure signal. See
-[Connection Pooling](docs/en/advanced-usage.md#connection-pooling) for sizing,
-retry semantics, and monitoring.
+[Connection Pooling](https://github.com/libraz/go-mygram-client/blob/main/docs/en/advanced-usage.md#connection-pooling)
+for sizing, retry semantics, and monitoring.
+
+## Search Expressions
+
+`ConvertSearchExpression` turns web-style input into a server boolean query:
+unprefixed terms and `+` terms are joined with `AND`, `-` terms become
+`AND NOT`, and an OR chain stays in parentheses.
+
+<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/search-expression.svg" alt="The web-syntax input golang &quot;machine learning&quot; -php +(tutorial OR guide) split into four terms and joined into the server query golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php." width="960">
+
+`Search` sends its query as literal text, so a boolean expression goes through
+`SearchRaw`, or through `Search` with `QueryMode: mygram.QueryBoolean` when it
+also needs filters, sorting, fuzzy matching or highlighting:
+
+```go
+raw, err := mygram.ConvertSearchExpression(`golang "machine learning" -php +(tutorial OR guide)`)
+// raw == `golang AND "machine learning" AND (tutorial OR guide) AND NOT php`
+
+resp, err := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
+
+resp, err = client.Search("articles", raw, mygram.SearchOptions{
+	QueryMode:  mygram.QueryBoolean,
+	SortColumn: "created_at",
+	SortDesc:   true,
+	Highlight:  &mygram.HighlightOptions{},
+})
+```
+
+In the default literal mode, plain user text keeps matching as a phrase. For
+input without OR or grouping, `SimplifySearchExpression` splits it into a main
+term plus AND/NOT terms for `Search`; it returns an error on OR or grouping, so
+check with `HasComplexExpression` first when the input may contain either:
+
+```go
+parsed, err := mygram.ParseSearchExpression(userInput)
+if err != nil {
+	return err
+}
+if mygram.HasComplexExpression(parsed) {
+	raw, _ := mygram.ConvertSearchExpression(userInput)
+	resp, err = client.SearchRaw("articles", raw, mygram.SearchRawOptions{})
+} else {
+	expr, _ := mygram.SimplifySearchExpression(userInput)
+	resp, err = client.Search("articles", expr.MainTerm, mygram.SearchOptions{
+		AndTerms: expr.AndTerms,
+		NotTerms: expr.NotTerms,
+		Limit:    100,
+		Filters:  map[string]string{"status": "published", "lang": "en"},
+	})
+}
+```
+
+## Search Features
+
+### BM25 Relevance Scoring
+
+Sort by relevance using the special `_score` sort column (requires
+`verify_text: ascii|all` on the server):
+
+```go
+resp, _ := client.Search("articles", "machine learning", mygram.SearchOptions{
+	SortColumn: "_score",
+	SortDesc:   true,
+	Limit:      10,
+})
+```
+
+### Fuzzy Search (Levenshtein)
+
+```go
+resp, _ := client.Search("articles", "machne", mygram.SearchOptions{
+	Fuzzy: 1, // match within 1 edit (or 2)
+	Limit: 10,
+})
+```
+
+### Highlighting
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+	Highlight: &mygram.HighlightOptions{
+		OpenTag:      "<strong>",
+		CloseTag:     "</strong>",
+		SnippetLen:   200,
+		MaxFragments: 3,
+	},
+	SortColumn: "_score",
+	SortDesc:   true,
+})
+for _, r := range resp.Results {
+	fmt.Println(r.PrimaryKey, r.Snippet)
+}
+```
+
+A zero-value `&mygram.HighlightOptions{}` enables highlighting with server
+defaults (`<em>`/`</em>`, 100 code points, up to 3 fragments).
+
+### Comparison Filters
+
+`Filters` expresses equality only. `FilterConditions` adds the comparison
+operators, and both forms may be combined on one request:
+
+```go
+resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
+	Filters: map[string]string{"status": "1"},
+	FilterConditions: []mygram.FilterCondition{
+		{Key: "views", Op: mygram.FilterGreaterThanOrEqual, Value: "100"},
+		{Key: "created_at", Op: mygram.FilterLessThan, Value: "2026-01-01"},
+	},
+})
+```
+
+### Facets
+
+Aggregate distinct filter-column values with document counts, optionally
+scoped to a search result set, and page through them with `Limit`/`Offset`:
+
+```go
+// Top categories among documents matching "machine learning":
+resp, _ := client.Facet("articles", "category", mygram.FacetOptions{
+	Query:   "machine learning",
+	Filters: map[string]string{"status": "1"},
+	Limit:   10,
+})
+for _, v := range resp.Results {
+	fmt.Printf("%s: %d\n", v.Value, v.Count)
+}
+
+page, _ := client.Facet("articles", "category", mygram.FacetOptions{Limit: 20, Offset: 40})
+fmt.Printf("%d of %d categories\n", len(page.Results), page.TotalCount)
+```
+
+### Multi-database Tables
+
+A server can index tables from more than one database. Reference a table as
+`database.table`; bare names work on single-database servers.
+
+```go
+resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
+
+id, _ := mygram.QualifyTableIdentity("articles", "app_db")  // "app_db.articles"
+db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articles"
+```
+
+## Wire Quoting
+
+Search terms, filter values, AND/NOT terms, highlight tags and primary keys
+all go through one quoting decision: a value is quoted when it is empty, a
+clause keyword (matched case-insensitively), or contains ASCII or Unicode
+whitespace, a control character, a quote, a backslash, or a parenthesis.
+Callers always pass raw, unquoted text; a highlight tag that needs quoting is
+quoted rather than rejected. See
+[Search Expressions](https://github.com/libraz/go-mygram-client/blob/main/docs/en/search-expression.md#notes)
+for the exact rule.
+
+```go
+// The full-width space stays inside one term.
+resp, _ := client.Search("articles", "機械学習　チュートリアル", mygram.SearchOptions{})
+
+// A filter value equal to a reserved keyword still matches literally.
+resp, _ = client.Search("articles", "q", mygram.SearchOptions{
+	Filters: map[string]string{"status": "AND"},
+})
+```
+
+Quoted primary keys and `GET` string values are decoded on the way back, so a
+`SEARCH` or `GET` result whose primary key or a string field contains a space
+round-trips intact.
+
+## Authentication and Error Codes
+
+### Administrative Authentication
+
+The server gates administrative commands (`DUMP`, `SYNC`, `REPLICATION`,
+`CONFIG`, `CACHE`, `OPTIMIZE`, `DEBUG`, `SET`, `SHOW VARIABLES`) behind `AUTH`.
+Set `ClientConfig.AdminToken` and the client sends `AUTH` on every connection,
+including the ones opened by an auto-reconnect and by a `Pool`:
+
+```go
+pool := mygram.NewPool(mygram.PoolConfig{
+	ClientConfig: mygram.ClientConfig{
+		Host:       "localhost",
+		Port:       11016,
+		AdminToken: os.Getenv("MYGRAM_ADMIN_TOKEN"),
+	},
+})
+```
+
+A rejected token fails `Connect` with `ErrCodePermissionDenied`, so a
+misconfigured token surfaces at startup. Ordinary search traffic needs no token.
+
+### Typed Error Codes
+
+Every `ERROR` frame carries a numeric code, exposed as `ServerError.Code`. The
+pool retries the transient codes (`ErrCodeServerLoading`,
+`ErrCodeServerNotReady`, `ErrCodeServerBusy`); others are returned as is:
+
+```go
+if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
+	if code, ok := mygram.ServerErrorCode(err); ok && code == mygram.ErrCodeTableNotFound {
+		// the table is not in the server's catalog
+	}
+}
+```
+
+### Readiness
+
+```go
+info, _ := client.Info()
+if !info.Ready() {
+	// the server is up but not yet serving queries
+}
+```
+
+## Server Administration
+
+### Replication Lag and Operation Deadlines
+
+`GetReplicationStatus` reports `SecondsSinceLastApplied`, stamped where the
+replication position advances, so it measures progress rather than
+connectivity; the server reports -1 until the first event is applied. It is an
+administrative command, so a server with a token configured needs `AdminToken`
+to answer it. `DUMP LOAD`, `DUMP VERIFY` and `OPTIMIZE` use their own budgets
+(`DumpLoadTimeoutMs`, `DumpVerifyTimeoutMs`, `OptimizeTimeoutMs`), leaving
+`TimeoutMs` short enough to detect a stalled query:
+
+```go
+status, err := client.GetReplicationStatus()
+if err == nil && status.SecondsSinceLastApplied > 60 {
+	log.Printf("replication is %ds behind: %s", status.SecondsSinceLastApplied, status.LastError)
+}
+```
+
+### Runtime Variables and On-demand Sync
+
+```go
+_ = client.SetVariable("logging.level", "info")
+out, _ := client.ShowVariables("logging%")
+
+_, _ = client.Sync("app_db.articles")
+syncStatus, _ := client.SyncStatus()
+_, _ = client.SyncStop("app_db.articles")
+```
 
 ## Documentation
 
-- [Getting Started](docs/en/getting-started.md) — install, configuration, and error handling
-- [Search Expressions](docs/en/search-expression.md) — parse web-style search input
-- [API Reference](docs/en/api-reference.md) — every method, option, and type
-- [Advanced Usage](docs/en/advanced-usage.md) — connection pooling and resilience (circuit breaker, observability events, TCP keep-alive, auto-reconnect), administrative `AUTH`, error codes, and the search features added through v1.10 (BM25 `_score`, fuzzy, highlighting, paginated facets, comparison filters, boolean query mode, multi-database, runtime variables, on-demand sync)
+- [Getting Started](https://github.com/libraz/go-mygram-client/blob/main/docs/en/getting-started.md) — install, configuration, and error handling
+- [Search Expressions](https://github.com/libraz/go-mygram-client/blob/main/docs/en/search-expression.md) — parse and convert web-style search input
+- [API Reference](https://github.com/libraz/go-mygram-client/blob/main/docs/en/api-reference.md) — every method, option, and type
+- [Advanced Usage](https://github.com/libraz/go-mygram-client/blob/main/docs/en/advanced-usage.md) — connection pooling, resilience, authentication, and error codes
 
-Japanese docs live under [`docs/ja/`](docs/ja/). Package-level API docs are also
-on [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client).
+Package-level API docs are on [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client).
 
 ## Development
 
@@ -178,8 +392,8 @@ make test-e2e
 # Override the endpoint
 MYGRAM_HOST=db.example.com MYGRAM_PORT=11016 make test-e2e
 
-# Authenticate administrative commands (mandatory from v1.10 on a
-# non-loopback bind)
+# Authenticate administrative commands (required by a server that
+# binds to a non-loopback address)
 MYGRAM_ADMIN_TOKEN=... make test-e2e
 
 # Skip side-effect heavy suites
@@ -195,7 +409,7 @@ toggle, dump round-trip) restore the original state on exit.
 `make test-e2e-docker` brings up a throwaway **MySQL + MygramDB** stack (the
 server is pulled from `ghcr.io/libraz/mygram-db`), seeds it with a deterministic
 dataset, runs the e2e suite with `MYGRAM_E2E_SEEDED=1`, then tears everything
-down. No local server is required. See [`e2e/docker/`](e2e/docker/README.md) for
+down. No local server is required. See [`e2e/docker/`](https://github.com/libraz/go-mygram-client/blob/main/e2e/docker/README.md) for
 knobs (`MYGRAMDB_VERSION`, `MYGRAM_ADMIN_TOKEN`, `KEEP_UP`, ports). The
 `TestE2ESeeded` block asserts exact result sets (database-qualified identity,
 phrase + required-filter visibility, Japanese ngram matching, `SearchRaw` OR,
@@ -203,4 +417,4 @@ facet counts and pagination, comparison filters, boolean query mode).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)

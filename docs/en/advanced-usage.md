@@ -1,7 +1,7 @@
 # Advanced Usage
 
-Production patterns, connection pooling, and the MygramDB v1.6/v1.7 feature
-surface.
+Production patterns, connection pooling, search features, and administration
+commands.
 
 ## Connection Pooling
 
@@ -72,9 +72,9 @@ The pool retries only failures that are safe to retry:
   retried for any command — nothing has been sent yet.
 - **Transient server rejections** — `ErrCodeServerLoading` (6028),
   `ErrCodeServerNotReady` (6029) and `ErrCodeServerBusy` (6030) on MygramDB
-  v1.10+ — are retried for any command. The server returns these *before*
-  executing, so re-issuing cannot apply anything twice. The decision comes from
-  the numeric code, never from matching the message text.
+  1.10 or later — are retried for any command. The server returns these
+  *before* executing, so re-issuing cannot apply anything twice. The decision
+  comes from the numeric code, never from matching the message text.
 - Every other server error, validation errors, and timeouts are never retried.
 
 The retry policy is configurable:
@@ -143,10 +143,11 @@ failure.
 
 ### Administrative Authentication
 
-A MygramDB v1.10+ server that sets `api.admin_token` — mandatory when its TCP
-listener does not bind to loopback — gates `DUMP`, `SYNC`, `REPLICATION`,
-`CONFIG`, `CACHE`, `OPTIMIZE`, `DEBUG`, `SET` and `SHOW VARIABLES` behind
-`AUTH`. The grant is per-connection, so it has to be replayed on every socket.
+A MygramDB server that sets `api.admin_token` (1.10 or later; mandatory when
+its TCP listener does not bind to loopback) gates `DUMP`, `SYNC`,
+`REPLICATION`, `CONFIG`, `CACHE`, `OPTIMIZE`, `DEBUG`, `SET` and
+`SHOW VARIABLES` behind `AUTH`. The grant is per-connection, so it has to be
+replayed on every socket.
 
 Set `ClientConfig.AdminToken` and the client sends `AUTH` as soon as a
 connection is established, including the ones opened by an auto-reconnect and by
@@ -309,7 +310,7 @@ func healthy(ctx context.Context, c *mygram.Client) (bool, error) {
 }
 ```
 
-## MygramDB v1.6 Features
+## Search Features
 
 ### BM25 Relevance Scoring
 
@@ -376,9 +377,9 @@ for _, v := range resp.Results {
 }
 ```
 
-On MygramDB v1.9+ a facet pages with `Limit` and `Offset`, and `TotalCount`
-reports how many distinct values exist before paging — which is what you need to
-size the pagination:
+A facet pages with `Limit` and `Offset`, and `TotalCount` reports how many
+distinct values exist before paging (MygramDB 1.9 or later) — which is what
+you need to size the pagination:
 
 ```go
 page, _ := client.Facet("articles", "category", mygram.FacetOptions{
@@ -391,62 +392,14 @@ fmt.Printf("showing %d of %d categories\n", len(page.Results), page.TotalCount)
 An older server reports only the page size, so `TotalCount` equals
 `len(Results)` there.
 
-## MygramDB v1.7 Features
-
-### Database-qualified Table Identity
-
-A single MygramDB instance can index same-named tables from different databases.
-Reference a table as `database.table` (e.g. `app_db.articles`); a bare name
-keeps working on a single-database server.
-
-```go
-resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
-
-// Build / parse identities explicitly when needed:
-id, _ := mygram.QualifyTableIdentity("articles", "app_db")  // "app_db.articles"
-db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articles"
-```
-
-### Raw Boolean Search
-
-`Search` decomposes into AND/NOT clauses, which cannot express `OR` or grouping.
-`SearchRaw` sends a pre-built boolean expression verbatim (unquoted) so the
-server tokenizes it and parses `AND` / `OR` / `NOT` / parentheses, including
-`OR` groups nested under `AND` (MygramDB v1.8+). Pair it with
-`ConvertSearchExpression`:
-
-```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
-resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
-
-// Snippet-returning variant:
-resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
-```
-
-### Runtime Variables
-
-```go
-_ = client.SetVariable("logging.level", "debug")
-out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
-```
-
-### On-demand Sync
-
-```go
-_, _ = client.Sync("articles")     // start a full reload of one table
-status, _ := client.SyncStatus()   // raw SYNC_STATUS report
-_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
-```
-
-## MygramDB v1.9 Features
-
 ### Comparison Filters
 
 `Filters` expresses equality only. `FilterConditions` adds the comparison
 operators the server accepts — `=`, `!=`, `>`, `>=`, `<`, `<=` — and both forms
-may be combined on one request. Map entries are sent in sorted key order and
-the conditions in slice order, so identical options always produce an identical
-command (which matters for the server's query cache).
+may be combined on one request (MygramDB 1.9 or later). Map entries are sent
+in sorted key order and the conditions in slice order, so identical options
+always produce an identical command (which matters for the server's query
+cache).
 
 ```go
 resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
@@ -465,9 +418,10 @@ resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
 
 `Search` treats its text as literal user input: it quotes the token, so a search
 for `AND` or `LIMIT` looks for those words rather than starting a clause. Set
-`QueryMode: mygram.QueryBoolean` to send the text verbatim instead, so the
-server's expression parser reads `AND` / `OR` / `NOT` and parentheses as
-operators — while keeping the typed options that `SearchRaw` does not accept:
+`QueryMode: mygram.QueryBoolean` to send the text verbatim instead (MygramDB
+1.9 or later), so the server's expression parser reads `AND` / `OR` / `NOT`
+and parentheses as operators — while keeping the typed options that
+`SearchRaw` does not accept:
 
 ```go
 resp, _ := client.Search("articles", "alpha AND (beta OR gamma)", mygram.SearchOptions{
@@ -498,12 +452,60 @@ resp, _ := client.Search("articles", "golang", mygram.SearchOptions{
 Naming both a sort column and a primary-key ordering is rejected client-side: a
 request carries a single `SORT` clause.
 
-## MygramDB v1.10 Features
+### Raw Boolean Search
 
-### Readiness
+`Search` decomposes into AND/NOT clauses, which cannot express `OR` or grouping.
+`SearchRaw` sends a pre-built boolean expression verbatim (unquoted) so the
+server tokenizes it and parses `AND` / `OR` / `NOT` / parentheses, including
+`OR` groups nested under `AND` (MygramDB 1.8 or later). Pair it with
+`ConvertSearchExpression`:
+
+```go
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
+resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
+
+// Snippet-returning variant:
+resp, _ = client.SearchRawWithHighlights("articles", raw, mygram.SearchRawOptions{})
+```
+
+## Multi-database Tables
+
+A single MygramDB instance can index same-named tables from different
+databases (MygramDB 1.7 or later). Reference a table as `database.table`
+(e.g. `app_db.articles`); a bare name keeps working on a single-database
+server.
+
+```go
+resp, _ := client.Search("app_db.articles", "hello", mygram.SearchOptions{Limit: 10})
+
+// Build / parse identities explicitly when needed:
+id, _ := mygram.QualifyTableIdentity("articles", "app_db")  // "app_db.articles"
+db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articles"
+```
+
+## Runtime Variables
+
+Requires MygramDB 1.7 or later.
+
+```go
+_ = client.SetVariable("logging.level", "debug")
+out, _ := client.ShowVariables("logging%") // raw server table; "" lists all
+```
+
+## On-demand Sync
+
+Requires MygramDB 1.7 or later.
+
+```go
+_, _ = client.Sync("articles")     // start a full reload of one table
+status, _ := client.SyncStatus()   // raw SYNC_STATUS report
+_, _ = client.SyncStop("articles") // stop one table's sync ("" stops all)
+```
+
+## Readiness
 
 `INFO` reports whether the server has finished building its state, evaluated
-from the same inputs as the HTTP readiness endpoint:
+from the same inputs as the HTTP readiness endpoint (MygramDB 1.10 or later):
 
 ```go
 info, _ := client.Info()
@@ -514,12 +516,13 @@ if !info.Ready() {
 ```
 
 Both fields are absent on older servers, where `Readiness` is empty and
-`Ready()` is false — so gate traffic on it only where MygramDB v1.10+ is known
-to be deployed.
+`Ready()` is false — so gate traffic on it only where MygramDB 1.10 or later
+is known to be deployed.
 
-### Error Codes
+## Error Codes
 
-Every `ERROR` frame carries a numeric code, exposed as `ServerError.Code`:
+Every `ERROR` frame carries a numeric code, exposed as `ServerError.Code`
+(MygramDB 1.10 or later):
 
 ```go
 if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
@@ -530,9 +533,9 @@ if _, err := client.Search("ghosts", "x", mygram.SearchOptions{}); err != nil {
 ```
 
 The pool uses the same codes to decide what to retry (see
-[Retry Semantics](#retry-semantics)). An uncoded frame from a pre-v1.10 server
-reports `ErrCodeNone` and is never retried, because its message text is not a
-reliable signal.
+[Retry Semantics](#retry-semantics)). An uncoded frame from a server older
+than MygramDB 1.10 reports `ErrCodeNone` and is never retried, because its
+message text is not a reliable signal.
 
 ## Persistence and Cache Administration
 
