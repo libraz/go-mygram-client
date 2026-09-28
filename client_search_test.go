@@ -277,6 +277,54 @@ func TestSearchAndTermWithSpaceQuoted(t *testing.T) {
 	}
 }
 
+// TestSearchUnicodeWhitespaceTermQuoted guards the wire-quoting whitespace
+// set against unicode.IsSpace, which does not agree with the server's rule
+// (spec/tcp-commands.md §2): notably it does not treat U+200B (zero width
+// space) as whitespace, while the server's tokenizer does.
+func TestSearchUnicodeWhitespaceTermQuoted(t *testing.T) {
+	cases := []struct {
+		name string
+		term string
+	}{
+		{"NBSP", "hello\u00a0world"},
+		{"zero width space", "hello\u200bworld"},
+		{"ideographic space", "hello\u3000world"},
+		{"line separator", "hello\u2028world"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := captureSearchCommand(t, tc.term, SearchOptions{Limit: 10})
+			want := `SEARCH threads "` + tc.term + `"`
+			if !strings.Contains(cmd, want) {
+				t.Errorf("command %q missing quoted term, want to contain %q", cmd, want)
+			}
+		})
+	}
+}
+
+// TestSearchReservedKeywordTermsQuoted guards every wire destination
+// EscapeQueryString reaches: a term, filter value, or AND/NOT term equal to
+// a clause keyword must be quoted, case-insensitively, or the server's
+// tokenizer reads it as the operator instead of data.
+func TestSearchReservedKeywordTermsQuoted(t *testing.T) {
+	cmd := captureSearchCommand(t, "and", SearchOptions{
+		Limit:    10,
+		AndTerms: []string{"NOT"},
+		NotTerms: []string{"or"},
+		Filters:  map[string]string{"status": "FILTER"},
+	})
+	for _, want := range []string{
+		`SEARCH threads "and"`,
+		`AND "NOT"`,
+		`NOT "or"`,
+		`FILTER status = "FILTER"`,
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command %q missing %q", cmd, want)
+		}
+	}
+}
+
 func TestSearchRejectsFilterKeyWithWhitespace(t *testing.T) {
 	c := NewClient("127.0.0.1:1") // unused; validation runs before connect
 	_, err := c.Search("threads", "hi", SearchOptions{
@@ -361,7 +409,9 @@ func TestSearchCommandFuzzyDistance1(t *testing.T) {
 }
 
 func TestSearchCommandHighlightDefault(t *testing.T) {
-	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n")
+	// A HIGHLIGHT reply always carries the trailing CRLF
+	// FormatSearchResponseWithHighlights appends, even with zero results.
+	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n\r\n")
 	defer cleanup()
 
 	c := NewClient(addr)
@@ -392,7 +442,7 @@ func TestSearchCommandHighlightDefault(t *testing.T) {
 }
 
 func TestSearchCommandHighlightCustom(t *testing.T) {
-	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n")
+	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n\r\n")
 	defer cleanup()
 
 	c := NewClient(addr)
@@ -446,7 +496,8 @@ func TestSearchCommandHighlightInvalid(t *testing.T) {
 func TestSearchWithHighlightResponse(t *testing.T) {
 	response := "OK RESULTS 2\r\n" +
 		"10\t<em>foo</em> bar\r\n" +
-		"11\tqux <em>foo</em>\r\n"
+		"11\tqux <em>foo</em>\r\n" +
+		"\r\n"
 	_, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
 
@@ -530,7 +581,7 @@ func TestSearchCommandNoV16Clauses(t *testing.T) {
 // server's query parser expects (SORT before FUZZY before HIGHLIGHT before
 // LIMIT).
 func TestSearchCommandCombinedV16Clauses(t *testing.T) {
-	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n")
+	srv, addr, cleanup := newRecordingServer(t, "OK RESULTS 0\r\n\r\n")
 	defer cleanup()
 
 	c := NewClient(addr)
@@ -693,7 +744,7 @@ func TestSearchRawOffsetOnly(t *testing.T) {
 }
 
 func TestSearchRawWithHighlights(t *testing.T) {
-	c, srv := connectRecording(t, "OK RESULTS 0\r\n")
+	c, srv := connectRecording(t, "OK RESULTS 0\r\n\r\n")
 	if _, err := c.SearchRawWithHighlights("articles", "go", SearchRawOptions{}); err != nil {
 		t.Fatalf("SearchRawWithHighlights: %v", err)
 	}
@@ -703,7 +754,7 @@ func TestSearchRawWithHighlights(t *testing.T) {
 }
 
 func TestSearchWithHighlights(t *testing.T) {
-	c, srv := connectRecording(t, "OK RESULTS 0\r\n")
+	c, srv := connectRecording(t, "OK RESULTS 0\r\n\r\n")
 	if _, err := c.SearchWithHighlights("articles", "go", SearchOptions{}); err != nil {
 		t.Fatalf("SearchWithHighlights: %v", err)
 	}

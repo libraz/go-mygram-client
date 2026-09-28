@@ -287,7 +287,9 @@ type SearchOptions struct {
 // 3 fragments).
 type HighlightOptions struct {
 	// OpenTag is the tag inserted before each matched term. When empty
-	// the server default ("<em>") is used.
+	// the server default ("<em>") is used. Sent on the wire through the
+	// same quoting decision as a search term, so whitespace or a clause
+	// keyword in the tag reaches the server as the literal tag it is.
 	OpenTag string
 
 	// CloseTag is the tag inserted after each matched term. When empty
@@ -383,7 +385,9 @@ type Document struct {
 	// PrimaryKey is the document's primary key.
 	PrimaryKey string
 
-	// Fields is a map of filter column key-value pairs.
+	// Fields is a map of filter column key-value pairs. A string-typed
+	// value quoted per spec/tcp-commands.md §11.1 (whitespace, a quote,
+	// a backslash or a control character) is decoded before it lands here.
 	Fields map[string]string
 }
 

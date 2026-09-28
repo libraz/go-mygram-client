@@ -20,6 +20,11 @@ import (
 //     ...
 //
 // Both formats optionally append a `# DEBUG` block terminated by \r\n\r\n.
+//
+// Primary keys are reversibly escaped per spec/tcp-commands.md §11.1 when
+// they are empty or contain whitespace, a quote, a backslash or a control
+// character, so both formats decode them with parseWireToken (wire_quoting.go)
+// rather than splitting on raw whitespace or a raw tab.
 func parseSearchResponse(response string) (*SearchResponse, error) {
 	// Normalize on \n for easier line handling; callers have already
 	// collapsed \r\n -> \n, but we guard here for completeness.
@@ -31,14 +36,33 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 		return nil, &ProtocolError{Message: "invalid SEARCH response: " + firstLine}
 	}
 
-	parts := strings.Fields(firstLine)
-	if len(parts) < 3 {
+	pos := 0
+	var ok bool
+	if _, pos, ok = parseWireToken(firstLine, pos); !ok { // "OK"
+		return nil, &ProtocolError{Message: "invalid SEARCH response: missing status"}
+	}
+	if _, pos, ok = parseWireToken(firstLine, pos); !ok { // "RESULTS"
+		return nil, &ProtocolError{Message: "invalid SEARCH response: missing RESULTS"}
+	}
+	totalCountStr, pos, ok := parseWireToken(firstLine, pos)
+	if !ok {
 		return nil, &ProtocolError{Message: "invalid SEARCH response: missing total count"}
 	}
-
-	totalCount, err := strconv.Atoi(parts[2])
+	totalCount, err := strconv.Atoi(totalCountStr)
 	if err != nil {
-		return nil, &ProtocolError{Message: "invalid total count: " + parts[2]}
+		return nil, &ProtocolError{Message: "invalid total count: " + totalCountStr}
+	}
+
+	// Remaining tokens on the header line are reversibly escaped primary
+	// keys (classic mode); HIGHLIGHT mode leaves nothing here.
+	var classicPKs []string
+	for {
+		tok, next, tokOK := parseWireToken(firstLine, pos)
+		if !tokOK {
+			break
+		}
+		pos = next
+		classicPKs = append(classicPKs, tok)
 	}
 
 	// Collect any subsequent lines that precede the debug block. If any
@@ -63,19 +87,21 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 		// HIGHLIGHT mode: first line contains only the count.
 		results = make([]SearchResult, 0, len(highlightLines))
 		for _, line := range highlightLines {
-			pk := line
-			snippet := ""
+			pkWire, snippet := line, ""
 			if tab := strings.IndexByte(line, '\t'); tab >= 0 {
-				pk = line[:tab]
-				snippet = line[tab+1:]
+				pkWire, snippet = line[:tab], line[tab+1:]
+			}
+			pk, endPos, pkOK := parseWireToken(pkWire, 0)
+			if !pkOK || endPos != len(pkWire) {
+				return nil, &ProtocolError{Message: "invalid SEARCH response: malformed primary key"}
 			}
 			results = append(results, SearchResult{PrimaryKey: pk, Snippet: snippet})
 		}
 	} else {
 		// Classic mode: PKs follow the count on the first line.
-		results = make([]SearchResult, 0, len(parts)-3)
-		for _, id := range parts[3:] {
-			results = append(results, SearchResult{PrimaryKey: id})
+		results = make([]SearchResult, 0, len(classicPKs))
+		for _, pk := range classicPKs {
+			results = append(results, SearchResult{PrimaryKey: pk})
 		}
 	}
 
@@ -212,7 +238,15 @@ func parseCountResponse(response string) (*CountResponse, error) {
 }
 
 // parseGetResponse parses a GET response.
-// Format: OK DOC <primary_key> <field1=value1> <field2=value2> ...
+// Format: OK DOC <primary_key>[ <field>=<value>]...
+//
+// The primary key and every string-typed field value are reversibly escaped
+// per spec/tcp-commands.md §11.1 when empty or containing whitespace, a
+// quote, a backslash or a control character, so both are decoded with
+// parseWireToken (wire_quoting.go) rather than split on raw whitespace or
+// '=', which would otherwise fragment a quoted key or value containing a
+// space. A field's name is never quoted (it is an identifier), so the '='
+// immediately following it is a reliable boundary between name and value.
 func parseGetResponse(response string) (*Document, error) {
 	firstLine := strings.Split(response, "\n")[0]
 
@@ -220,18 +254,38 @@ func parseGetResponse(response string) (*Document, error) {
 		return nil, &ProtocolError{Message: "invalid GET response: " + firstLine}
 	}
 
-	parts := strings.Fields(firstLine)
-	if len(parts) < 3 {
+	pos := 0
+	var ok bool
+	if _, pos, ok = parseWireToken(firstLine, pos); !ok { // "OK"
+		return nil, &ProtocolError{Message: "invalid GET response: missing status"}
+	}
+	if _, pos, ok = parseWireToken(firstLine, pos); !ok { // "DOC"
+		return nil, &ProtocolError{Message: "invalid GET response: missing DOC"}
+	}
+	pk, pos, ok := parseWireToken(firstLine, pos)
+	if !ok {
 		return nil, &ProtocolError{Message: "invalid GET response: missing primary key"}
 	}
 
-	pk := parts[2]
 	fields := make(map[string]string)
-	for _, kv := range parts[3:] {
-		idx := strings.Index(kv, "=")
-		if idx > 0 {
-			fields[kv[:idx]] = kv[idx+1:]
+	for {
+		for pos < len(firstLine) && isASCIISpaceByte(firstLine[pos]) {
+			pos++
 		}
+		if pos >= len(firstLine) {
+			break
+		}
+		eq := strings.IndexByte(firstLine[pos:], '=')
+		if eq <= 0 {
+			break
+		}
+		name := firstLine[pos : pos+eq]
+		value, next, valueOK := parseWireToken(firstLine, pos+eq+1)
+		if !valueOK {
+			break
+		}
+		fields[name] = value
+		pos = next
 	}
 
 	return &Document{

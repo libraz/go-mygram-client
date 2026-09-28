@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Response reading (client.go): the completeness gate that decides when a
@@ -236,5 +237,138 @@ func TestMaxResponseSizeUnlimitedByDefault(t *testing.T) {
 	}
 	if len(resp.Results) != 5000 {
 		t.Errorf("got %d facet values, want 5000", len(resp.Results))
+	}
+}
+
+// TestSearchHighlightResponseChunked delivers a SEARCH...HIGHLIGHT reply in
+// two writes, with the first ending exactly at the header line's "\r\n" --
+// the chunk boundary that used to make the client return a highlight-less
+// response, since a SEARCH/COUNT header reads identically whether or not a
+// highlight/debug body follows it (client.go isResponseCompleteFor).
+func TestSearchHighlightResponseChunked(t *testing.T) {
+	addr, cleanup := mockServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+		if _, err := conn.Read(buf); err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte("OK RESULTS 1\r\n")); err != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+		_, _ = conn.Write([]byte("42\t<em>kw</em>\r\n\r\n"))
+	})
+	defer cleanup()
+
+	c := NewClient(addr)
+	c.config.MaxQueryLength = 0
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Search("threads", "kw", SearchOptions{Highlight: &HighlightOptions{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 {
+		t.Fatalf("len(Results) = %d, want 1", len(resp.Results))
+	}
+	if resp.Results[0].PrimaryKey != "42" || resp.Results[0].Snippet != "<em>kw</em>" {
+		t.Errorf("Results[0] = %+v", resp.Results[0])
+	}
+}
+
+// TestSearchDebugResponseChunked delivers a SEARCH reply under DEBUG ON in
+// two writes, split so the second write opens with the DEBUG block's own
+// "\r\n\r\n# DEBUG\r\n" marker -- itself a blank line, which the client must
+// not mistake for the frame's terminator before the marker has fully
+// arrived (client.go isResponseCompleteFor's expectDebugMarker gate).
+func TestSearchDebugResponseChunked(t *testing.T) {
+	addr, cleanup := mockServer(t, func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		buf := make([]byte, 4096)
+
+		if _, err := conn.Read(buf); err != nil { // DEBUG ON
+			return
+		}
+		if _, err := conn.Write([]byte("OK\r\n")); err != nil {
+			return
+		}
+
+		if _, err := conn.Read(buf); err != nil { // SEARCH
+			return
+		}
+		if _, err := conn.Write([]byte("OK RESULTS 1 42\r\n")); err != nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+		_, _ = conn.Write([]byte("\r\n# DEBUG\r\nquery_time: 1.0\r\n\r\n"))
+	})
+	defer cleanup()
+
+	c := NewClient(addr)
+	c.config.MaxQueryLength = 0
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.EnableDebug(); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := c.Search("threads", "kw", SearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].PrimaryKey != "42" {
+		t.Fatalf("Results = %+v", resp.Results)
+	}
+	if resp.Debug == nil || resp.Debug.QueryTimeMs != 1.0 {
+		t.Errorf("Debug = %+v", resp.Debug)
+	}
+}
+
+// TestConnectIPv6Loopback connects to a server listening on the IPv6
+// loopback address, exercising net.JoinHostPort's bracketing of a literal
+// IPv6 host (client.go dial) rather than a hostname that happens to resolve
+// to one.
+func TestConnectIPv6Loopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer func() { _ = ln.Close() }()
+
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 4096)
+				if _, readErr := c.Read(buf); readErr != nil {
+					return
+				}
+				_, _ = c.Write([]byte("OK RESULTS 1 42\r\n"))
+			}(conn)
+		}
+	}()
+
+	host, port := splitHostPort(t, ln.Addr().String())
+	c := NewClientWithConfig(ClientConfig{Host: host, Port: port, MaxQueryLength: 0})
+	defer func() { _ = c.Close() }()
+	if err := c.Connect(); err != nil {
+		t.Fatalf("connect over IPv6: %v", err)
+	}
+
+	resp, err := c.Search("threads", "kw", SearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 1 || resp.Results[0].PrimaryKey != "42" {
+		t.Fatalf("Results = %+v", resp.Results)
 	}
 }

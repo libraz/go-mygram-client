@@ -231,11 +231,17 @@ func TestValidateHighlight(t *testing.T) {
 	if err := validateHighlight(&HighlightOptions{SnippetLen: 200, MaxFragments: 5}); err != nil {
 		t.Errorf("limits in range: err=%v", err)
 	}
+	// Whitespace in a tag is no longer rejected here: appendHighlightClause
+	// quotes each tag through the shared wire-quoting encoder before it
+	// reaches the wire (wire_quoting.go), matching the C++ client's
+	// validation (ValidateNoControlCharacters only).
+	if err := validateHighlight(&HighlightOptions{OpenTag: "<em class='x'>", CloseTag: "</em>"}); err != nil {
+		t.Errorf("whitespace in tag: err=%v", err)
+	}
 
 	bad := []HighlightOptions{
 		{OpenTag: "<b>"},   // missing close
 		{CloseTag: "</b>"}, // missing open
-		{OpenTag: "<em class='x'>", CloseTag: "</em>"}, // whitespace in tag
 		{SnippetLen: -1},
 		{SnippetLen: 10001},
 		{MaxFragments: -1},
@@ -278,8 +284,8 @@ func TestEscapeQueryString(t *testing.T) {
 		{"with single quote", "it's", `"it's"`},
 		{"with double quote", `say "hi"`, `"say \"hi\""`},
 		{"with backslash", `a\b c`, `"a\\b c"`},
-		{"control chars dropped when quoted", "a\x00b c", `"ab c"`},
-		{"tab triggers quoting", "a\tb", `"ab"`},
+		{"control chars escaped reversibly when quoted", "a\x00b c", `"a\x00b c"`},
+		{"tab triggers quoting and is escaped reversibly", "a\tb", `"a\tb"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

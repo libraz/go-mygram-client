@@ -169,6 +169,51 @@ func TestParseSearchResponseHighlight(t *testing.T) {
 	})
 }
 
+// parseSearchResponse: primary keys are reversibly escaped per
+// spec/tcp-commands.md §11.1 when they contain whitespace, so both formats
+// must decode a quoted key rather than splitting on raw whitespace/tab.
+func TestParseSearchResponseQuotedPrimaryKey(t *testing.T) {
+	t.Run("classic mode, quoted key with a space", func(t *testing.T) {
+		resp, err := parseSearchResponse(`OK RESULTS 2 "id one" id2`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 2 {
+			t.Fatalf("len(Results) = %d, want 2", len(resp.Results))
+		}
+		if resp.Results[0].PrimaryKey != "id one" {
+			t.Errorf("Results[0].PrimaryKey = %q, want %q", resp.Results[0].PrimaryKey, "id one")
+		}
+		if resp.Results[1].PrimaryKey != "id2" {
+			t.Errorf("Results[1].PrimaryKey = %q, want %q", resp.Results[1].PrimaryKey, "id2")
+		}
+	})
+
+	t.Run("highlight mode, quoted key with a space", func(t *testing.T) {
+		response := "OK RESULTS 1\n" + `"id one"` + "\tsnippet text\n"
+		resp, err := parseSearchResponse(response)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Results) != 1 {
+			t.Fatalf("len(Results) = %d, want 1", len(resp.Results))
+		}
+		if resp.Results[0].PrimaryKey != "id one" {
+			t.Errorf("PrimaryKey = %q, want %q", resp.Results[0].PrimaryKey, "id one")
+		}
+		if resp.Results[0].Snippet != "snippet text" {
+			t.Errorf("Snippet = %q, want %q", resp.Results[0].Snippet, "snippet text")
+		}
+	})
+
+	t.Run("highlight mode, malformed quoted key is a protocol error", func(t *testing.T) {
+		response := "OK RESULTS 1\n" + `"unterminated` + "\tsnippet\n"
+		if _, err := parseSearchResponse(response); err == nil {
+			t.Error("expected error for unterminated quoted primary key")
+		}
+	})
+}
+
 // parseSearchResponse: defensive handling of malformed first lines.
 func TestParseSearchResponseMalformed(t *testing.T) {
 	cases := []string{
@@ -253,6 +298,48 @@ func TestParseGetResponse(t *testing.T) {
 		}
 		if len(resp.Fields) != 0 {
 			t.Errorf("len(Fields) = %d, want 0", len(resp.Fields))
+		}
+	})
+
+	t.Run("quoted primary key with a space", func(t *testing.T) {
+		resp, err := parseGetResponse(`OK DOC "id one" status=1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.PrimaryKey != "id one" {
+			t.Errorf("PrimaryKey = %q, want %q", resp.PrimaryKey, "id one")
+		}
+		if resp.Fields["status"] != "1" {
+			t.Errorf("Fields[status] = %q, want %q", resp.Fields["status"], "1")
+		}
+	})
+
+	t.Run("quoted string field value with a space", func(t *testing.T) {
+		resp, err := parseGetResponse(`OK DOC 12345 title="hello world" status=1 category=tech`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.PrimaryKey != "12345" {
+			t.Errorf("PrimaryKey = %q, want %q", resp.PrimaryKey, "12345")
+		}
+		if resp.Fields["title"] != "hello world" {
+			t.Errorf("Fields[title] = %q, want %q", resp.Fields["title"], "hello world")
+		}
+		if resp.Fields["status"] != "1" {
+			t.Errorf("Fields[status] = %q, want %q", resp.Fields["status"], "1")
+		}
+		if resp.Fields["category"] != "tech" {
+			t.Errorf("Fields[category] = %q, want %q", resp.Fields["category"], "tech")
+		}
+	})
+
+	t.Run("field value with escaped characters", func(t *testing.T) {
+		resp, err := parseGetResponse(`OK DOC 1 note="say \"hi\"\ttab"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Fields["note"] != "say \"hi\"\ttab" {
+			t.Errorf("Fields[note] = %q", resp.Fields["note"])
 		}
 	})
 }

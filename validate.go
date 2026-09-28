@@ -3,7 +3,6 @@ package mygram
 import (
 	"fmt"
 	"strings"
-	"unicode"
 )
 
 // controlCharNames maps control characters to their display names.
@@ -145,7 +144,7 @@ func validateIdentifier(value, fieldName string) error {
 				Message: fmt.Sprintf("input for %s contains %s, which is not allowed", fieldName, name),
 			}
 		}
-		if unicode.IsSpace(r) {
+		if isWireWhitespace(r) {
 			return &ValidationError{
 				Message: fmt.Sprintf("input for %s contains whitespace, which is not allowed in identifiers", fieldName),
 			}
@@ -222,128 +221,34 @@ func validateQueryMode(mode QueryMode) error {
 	return nil
 }
 
-// quoteToken wraps a value in double quotes, backslash-escaping '"' and '\'
-// and dropping any remaining control character so it cannot break the framing.
-// Callers decide whether quoting is needed; a value that needs none is sent
-// verbatim so simple single-token queries stay byte-identical on the wire.
-func quoteToken(value string) string {
-	var sb strings.Builder
-	sb.Grow(len(value) + 2)
-	sb.WriteByte('"')
-	for _, r := range value {
-		switch {
-		case r == '"' || r == '\\':
-			sb.WriteByte('\\')
-			sb.WriteRune(r)
-		case r < 0x20:
-			// Drop control characters.
-			continue
-		default:
-			sb.WriteRune(r)
-		}
-	}
-	sb.WriteByte('"')
-	return sb.String()
-}
-
-// queryReservedWords lists the tokens the server's query grammar consumes as
-// clause keywords. A literal search term equal to one of them must be quoted,
-// or the server would read it as the start of a clause instead of as data.
-var queryReservedWords = map[string]bool{
-	"AND":       true,
-	"OR":        true,
-	"NOT":       true,
-	"FILTER":    true,
-	"SORT":      true,
-	"LIMIT":     true,
-	"OFFSET":    true,
-	"HIGHLIGHT": true,
-	"FUZZY":     true,
-	"FACET":     true,
-	"ORDER":     true,
-}
-
 // escapeQueryString quotes and escapes a free-form query value for use as a
-// wire token.
-//
-// Empty strings are emitted as the explicit "" token to keep the wire form
-// unambiguous: an unquoted empty arg would collapse into surrounding
-// whitespace and produce a malformed command (e.g. "SEARCH table  AND foo").
-//
-// A value is quoted when it is a standalone clause keyword, or when it
-// contains whitespace, a quote, a backslash or a parenthesis — all of which
-// the server's tokenizer or expression parser would otherwise read as syntax.
-// Inside the quotes, '"' and '\' are backslash-escaped and control characters
-// are stripped to prevent command injection. Mirrors the C++ client's
-// EscapeQueryString.
+// wire token: a search term, filter value, or AND/NOT term. Delegates to
+// quoteWireToken, the single quote/escape decision shared by every string
+// that reaches the wire (wire_quoting.go), which also covers the empty-string
+// case — emitted as the explicit "" token so an unquoted empty arg cannot
+// collapse into surrounding whitespace and produce a malformed command (e.g.
+// "SEARCH table  AND foo"). Mirrors the C++ client's EscapeQueryString.
 func escapeQueryString(value string) string {
-	if value == "" {
-		return `""`
-	}
-	if queryReservedWords[strings.ToUpper(value)] {
-		return quoteToken(value)
-	}
-	for _, r := range value {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '"' || r == '\'' || r == '\\' || r == '(' || r == ')' {
-			return quoteToken(value)
-		}
-	}
-	return value
+	return quoteWireToken(value)
 }
 
-// escapeProtocolToken quotes a data token — a primary key, say — reversibly:
-// unlike escapeQueryString it encodes control characters as escape sequences
-// the server's tokenizer decodes, rather than dropping them, so any value the
-// server can return can also be sent back to it. Mirrors the C++ client's
+// escapeProtocolToken quotes a data token — a primary key, say — for the
+// wire. Delegates to quoteWireToken, whose encoding is already reversible
+// (control characters are escaped, not dropped), so any value the server can
+// return can also be sent back to it. Mirrors the C++ client's
 // EscapeProtocolToken.
 func escapeProtocolToken(value string) string {
-	needsQuotes := value == ""
-	for _, r := range value {
-		if unicode.IsSpace(r) || isControlChar(r) || r == '"' || r == '\'' || r == '\\' {
-			needsQuotes = true
-			break
-		}
-	}
-	if !needsQuotes {
-		return value
-	}
-
-	var sb strings.Builder
-	sb.Grow(len(value) + 2)
-	sb.WriteByte('"')
-	// Escaping is defined over bytes: a multi-byte rune has no byte below 0x80,
-	// so its bytes pass through untouched and the encoding stays reversible.
-	for i := 0; i < len(value); i++ {
-		ch := value[i]
-		switch {
-		case ch == '\\':
-			sb.WriteString(`\\`)
-		case ch == '"':
-			sb.WriteString(`\"`)
-		case ch == '\r':
-			sb.WriteString(`\r`)
-		case ch == '\n':
-			sb.WriteString(`\n`)
-		case ch == '\t':
-			sb.WriteString(`\t`)
-		case ch < 0x20 || ch == 0x7f:
-			fmt.Fprintf(&sb, `\x%02X`, ch)
-		default:
-			sb.WriteByte(ch)
-		}
-	}
-	sb.WriteByte('"')
-	return sb.String()
+	return quoteWireToken(value)
 }
 
 // quoteCommandArgument quotes a free-form command argument (e.g. a SET value,
-// a SHOW VARIABLES LIKE pattern, or a DUMP filepath) when it contains
-// whitespace, quote characters or a backslash. Mirrors the C++ client's
-// QuoteCommandArgumentIfNeeded.
+// a SHOW VARIABLES LIKE pattern, or a DUMP filepath). Mirrors the C++
+// client's QuoteCommandArgumentIfNeeded, which delegates to the same shared
+// QuoteWireToken.
 //
 // Unlike escapeQueryString, the value is validated for control characters
-// first (returning an error rather than silently stripping them); an empty
-// value is allowed and surfaced as the explicit empty token "".
+// first, returning an error rather than sending one reversibly encoded; an
+// empty value is allowed and surfaced as the explicit empty token "".
 func quoteCommandArgument(value, fieldName string) (string, error) {
 	if value == "" {
 		return `""`, nil
@@ -351,12 +256,7 @@ func quoteCommandArgument(value, fieldName string) (string, error) {
 	if err := ensureSafeValue(value, fieldName); err != nil {
 		return "", err
 	}
-	for _, r := range value {
-		if unicode.IsSpace(r) || r == '"' || r == '\'' || r == '\\' {
-			return quoteToken(value), nil
-		}
-	}
-	return value, nil
+	return quoteWireToken(value), nil
 }
 
 // QualifyTableIdentity builds a database-qualified table identity
@@ -423,7 +323,9 @@ func validateFuzzy(distance int) error {
 // validateHighlight validates HIGHLIGHT clause options. OpenTag and CloseTag
 // must both be empty or both set; SnippetLen must be within 1..10000 when set;
 // MaxFragments must be within 1..100 when set. Tags must not contain control
-// characters or spaces (the protocol is whitespace-delimited).
+// characters; whitespace is allowed since appendHighlightClause sends each tag
+// through the shared wire-quoting encoder (wire_quoting.go), matching the C++
+// client's validation (ValidateNoControlCharacters only).
 func validateHighlight(h *HighlightOptions) error {
 	if h == nil {
 		return nil
@@ -442,13 +344,6 @@ func validateHighlight(h *HighlightOptions) error {
 		}
 		if err := ensureSafeValue(tag.value, tag.name); err != nil {
 			return err
-		}
-		for _, r := range tag.value {
-			if unicode.IsSpace(r) {
-				return &ValidationError{
-					Message: fmt.Sprintf("%s must not contain whitespace: %q", tag.name, tag.value),
-				}
-			}
 		}
 	}
 	if h.SnippetLen < 0 || h.SnippetLen > 10000 {

@@ -44,6 +44,13 @@ type Client struct {
 	// scratch is a reusable receive buffer, allocated once per connection to
 	// avoid a per-command allocation on the hot read path. Guarded by mu.
 	scratch []byte
+
+	// debugMode mirrors the server's per-connection DEBUG ON/OFF flag
+	// (spec/tcp-commands.md §10.7), so sendCommandWithTimeout knows a
+	// SEARCH/COUNT reply will carry a trailing debug block before any bytes
+	// of it have arrived. Reset on every fresh connection since the flag
+	// does not survive a new server-side connection. Guarded by mu.
+	debugMode bool
 }
 
 // NewClient creates a new client for the given address. addr should be in
@@ -126,6 +133,7 @@ func (c *Client) ConnectContext(ctx context.Context) error {
 		return err
 	}
 	c.conn = conn
+	c.debugMode = false
 	return nil
 }
 
@@ -204,7 +212,9 @@ func (c *Client) authenticateConn(conn net.Conn, timeout time.Duration) error {
 	if _, err := conn.Write([]byte("AUTH " + token + "\r\n")); err != nil {
 		return &ConnectionError{Message: "failed to send AUTH", Err: err, beforeSend: true}
 	}
-	response, err := c.readFrom(conn, timeout)
+	// AUTH's reply is always single-line: neither SEARCH nor COUNT, so no
+	// multi-line tail can follow it.
+	response, err := c.readFrom(conn, timeout, false, false)
 	if err != nil {
 		return err
 	}
@@ -240,6 +250,7 @@ func (c *Client) reconnectLocked(ctx context.Context) error {
 		return err
 	}
 	c.conn = conn
+	c.debugMode = false
 	return nil
 }
 
@@ -388,16 +399,24 @@ func (c *Client) sendCommandWithTimeout(ctx context.Context, command string, tim
 			return "", &ConnectionError{Message: "failed to send command", Err: err, beforeSend: true}
 		}
 
-		return c.finishCommand(ctx, timeout, ctxDeadlineBinding)
+		// A SEARCH/COUNT reply's header line reads identically whether or not
+		// a highlight/debug body follows it, so isResponseCompleteFor needs to
+		// be told up front when this command's reply cannot end at that
+		// header. Every other command's single-line reply is unaffected.
+		isSearchOrCount := isSearchOrCountCommand(command)
+		expectMultilineTail := isSearchOrCount && (c.debugMode || commandRequestsHighlight(command))
+		expectDebugMarker := isSearchOrCount && c.debugMode
+
+		return c.finishCommand(ctx, timeout, ctxDeadlineBinding, expectMultilineTail, expectDebugMarker)
 	}
 }
 
 // finishCommand reads and normalizes the response after the command has been
 // written. A read-phase failure is never resent: the command was delivered, so
 // its outcome is unknown.
-func (c *Client) finishCommand(ctx context.Context, timeout time.Duration, ctxDeadlineBinding bool) (string, error) {
+func (c *Client) finishCommand(ctx context.Context, timeout time.Duration, ctxDeadlineBinding, expectMultilineTail, expectDebugMarker bool) (string, error) {
 	// Read
-	response, err := c.readResponse(timeout)
+	response, err := c.readResponse(timeout, expectMultilineTail, expectDebugMarker)
 	if err != nil {
 		// If the read timed out because the caller's context deadline was the
 		// binding one (the effective deadline is min(ctx, TimeoutMs)), attribute
@@ -427,8 +446,8 @@ func (c *Client) finishCommand(ctx context.Context, timeout time.Duration, ctxDe
 // A failure other than a timeout leaves the connection unusable, so it is
 // closed and cleared here; a timeout leaves the socket intact for the caller
 // to classify.
-func (c *Client) readResponse(timeout time.Duration) (string, error) {
-	response, err := c.readFrom(c.conn, timeout)
+func (c *Client) readResponse(timeout time.Duration, expectMultilineTail, expectDebugMarker bool) (string, error) {
+	response, err := c.readFrom(c.conn, timeout, expectMultilineTail, expectDebugMarker)
 	if err != nil {
 		if _, isTimeout := err.(*TimeoutError); !isTimeout {
 			_ = c.conn.Close()
@@ -443,8 +462,12 @@ func (c *Client) readResponse(timeout time.Duration) (string, error) {
 // on the client's connection state, so it also serves the connection handshake,
 // which runs before the socket is published as c.conn.
 //
+// expectMultilineTail and expectDebugMarker resolve the SEARCH/COUNT header
+// ambiguity (see sendCommandWithTimeout); every other caller passes false for
+// both, since their command's reply is unambiguous from its own bytes.
+//
 // The scratch buffer it reuses is guarded by c.mu, which every caller holds.
-func (c *Client) readFrom(conn net.Conn, timeout time.Duration) (string, error) {
+func (c *Client) readFrom(conn net.Conn, timeout time.Duration, expectMultilineTail, expectDebugMarker bool) (string, error) {
 	if c.scratch == nil {
 		c.scratch = make([]byte, c.config.RecvBufferSize)
 	}
@@ -479,7 +502,7 @@ func (c *Client) readFrom(conn net.Conn, timeout time.Duration) (string, error) 
 		// condition that lets us skip that scan until a terminator could
 		// plausibly be present, avoiding an O(n^2) blowup on large responses.
 		data := sb.String()
-		if responseMayBeComplete(data) && isResponseComplete(data) {
+		if responseMayBeComplete(data) && isResponseCompleteFor(data, expectMultilineTail, expectDebugMarker) {
 			return data, nil
 		}
 	}
@@ -515,8 +538,24 @@ var endTerminatedPrefixes = []endTerminatedPrefix{
 	{"OK DUMP_INFO", false},
 }
 
-// isResponseComplete determines whether the response has been fully received.
+// isResponseComplete determines whether the response has been fully received,
+// with no command context. Safe for every response type except the
+// SEARCH/COUNT header ambiguity that isResponseCompleteFor resolves; kept for
+// tests and any caller that does not carry that context.
 func isResponseComplete(data string) bool {
+	return isResponseCompleteFor(data, false, false)
+}
+
+// isResponseCompleteFor determines whether the response has been fully
+// received. expectMultilineTail and expectDebugMarker resolve the
+// SEARCH/COUNT header ambiguity: a header line ("OK RESULTS ...\r\n" /
+// "OK COUNT ...\r\n") reads identically whether or not a highlight/debug body
+// follows it, so whether it is the whole response can only be decided from
+// the command that was sent (a HIGHLIGHT clause present, or DEBUG ON on this
+// connection) — never from where a chunk boundary happened to land. Every
+// other response type classifies itself from its own bytes and ignores both
+// flags.
+func isResponseCompleteFor(data string, expectMultilineTail, expectDebugMarker bool) bool {
 	endsWithBlank := strings.HasSuffix(data, "\n\n") ||
 		strings.HasSuffix(data, "\r\n\r\n") ||
 		strings.HasSuffix(data, "\n\r\n")
@@ -561,30 +600,46 @@ func isResponseComplete(data string) bool {
 		return endsWithBlank
 	}
 
-	// Generic multi-line terminator (e.g. SEARCH HIGHLIGHT).
-	if endsWithBlank {
-		return true
-	}
-
-	// DEBUG response.
-	if strings.Contains(data, "# DEBUG") {
+	// SHOW VARIABLES with rows: a bare ASCII table with no OK/+OK/ERROR
+	// status prefix (spec/tcp-commands.md §13, item 1) — every other
+	// response on this surface begins with "OK ", "+OK" or "ERROR ". The
+	// "+-" border is distinctive enough to classify without command context.
+	if strings.HasPrefix(data, "+-") {
 		return endsWithBlank
 	}
 
-	// Single-line response with trailing newline.
-	lines := strings.Split(data, "\n")
-	if len(lines) >= 2 && lines[len(lines)-1] == "" {
+	// A header line that could be the whole response, or could be followed
+	// by a HIGHLIGHT/DEBUG body identical up to this point: only safe to
+	// accept here when the caller has ruled that possibility out.
+	if single, found := isSingleLineResponse(data); found && single && !expectMultilineTail {
 		return true
 	}
-	if strings.HasSuffix(data, "\r\n") && !strings.Contains(data, "\n\n") {
-		// Single line with CRLF termination
-		first := strings.TrimRight(data, "\r\n")
-		if !strings.Contains(first, "\n") {
-			return true
-		}
+
+	// A DEBUG block's own opening ("\r\n\r\n# DEBUG\r\n" or "\n\n# DEBUG\n")
+	// is itself a blank line, so a chunk boundary landing right after it
+	// would otherwise look like the frame's true end. Wait for the literal
+	// marker to have fully arrived before trusting any blank-line match.
+	if expectDebugMarker && !strings.Contains(data, "# DEBUG") {
+		return false
 	}
 
-	return false
+	return endsWithBlank
+}
+
+// isSingleLineResponse reports whether data consists of exactly one
+// terminated line — nothing after its first "\r\n" or "\n" — and whether a
+// line terminator was found at all.
+func isSingleLineResponse(data string) (single, found bool) {
+	idxCRLF := strings.Index(data, "\r\n")
+	idxLF := strings.Index(data, "\n")
+	switch {
+	case idxCRLF == -1 && idxLF == -1:
+		return false, false
+	case idxCRLF != -1 && (idxLF == -1 || idxCRLF <= idxLF):
+		return idxCRLF+2 == len(data), true
+	default:
+		return idxLF+1 == len(data), true
+	}
 }
 
 // extractFirstLine returns the first line of the buffer (stripped of CR/LF)
@@ -600,6 +655,34 @@ func extractFirstLine(data string) (string, bool) {
 	default:
 		return data[:idxLF], true
 	}
+}
+
+// isSearchOrCountCommand reports whether command's verb is SEARCH or COUNT —
+// the only two that produce an "OK RESULTS"/"OK COUNT" header a trailing
+// DEBUG block can follow. Every other command's single-line reply is
+// genuinely done at its first \r\n regardless of the connection's debug flag.
+func isSearchOrCountCommand(command string) bool {
+	verbEnd := strings.IndexAny(command, " \t")
+	verb := command
+	if verbEnd >= 0 {
+		verb = command[:verbEnd]
+	}
+	return strings.EqualFold(verb, "SEARCH") || strings.EqualFold(verb, "COUNT")
+}
+
+// commandRequestsHighlight reports whether command's HIGHLIGHT clause, if
+// any, is real. HIGHLIGHT is a case-insensitive clause keyword recognized as
+// a bare, whitespace-delimited token; escapeQueryString quotes any
+// query/AND/NOT/FILTER value that collides with it (wire_quoting.go), so an
+// unquoted HIGHLIGHT token in the command text can only be the real clause —
+// matching the same ambiguity the server itself resolves by quoting.
+func commandRequestsHighlight(command string) bool {
+	for _, field := range strings.FieldsFunc(command, func(r rune) bool { return r == ' ' || r == '\t' }) {
+		if strings.EqualFold(field, "HIGHLIGHT") {
+			return true
+		}
+	}
+	return false
 }
 
 // Search performs a full-text search.
@@ -771,7 +854,11 @@ func appendHighlightClause(parts *[]string, h *HighlightOptions) {
 	}
 	*parts = append(*parts, "HIGHLIGHT")
 	if h.OpenTag != "" || h.CloseTag != "" {
-		*parts = append(*parts, "TAG", h.OpenTag, h.CloseTag)
+		// Tags are data, not identifiers: quoted through the same wire-quoting
+		// decision as every other string reaching the wire (wire_quoting.go),
+		// so a tag containing whitespace or colliding with a clause keyword
+		// still reaches the server as the literal tag it was configured as.
+		*parts = append(*parts, "TAG", quoteWireToken(h.OpenTag), quoteWireToken(h.CloseTag))
 	}
 	if h.SnippetLen > 0 {
 		*parts = append(*parts, "SNIPPET_LEN", strconv.Itoa(h.SnippetLen))
@@ -1017,8 +1104,13 @@ func (c *Client) EnableDebug() error {
 
 // EnableDebugContext enables debug mode with the given context.
 func (c *Client) EnableDebugContext(ctx context.Context) error {
-	_, err := c.SendCommandContext(ctx, "DEBUG ON")
-	return err
+	if _, err := c.SendCommandContext(ctx, "DEBUG ON"); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.debugMode = true
+	c.mu.Unlock()
+	return nil
 }
 
 // DisableDebug disables debug mode.
@@ -1028,8 +1120,13 @@ func (c *Client) DisableDebug() error {
 
 // DisableDebugContext disables debug mode with the given context.
 func (c *Client) DisableDebugContext(ctx context.Context) error {
-	_, err := c.SendCommandContext(ctx, "DEBUG OFF")
-	return err
+	if _, err := c.SendCommandContext(ctx, "DEBUG OFF"); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.debugMode = false
+	c.mu.Unlock()
+	return nil
 }
 
 // DumpSave saves the index to a file.
