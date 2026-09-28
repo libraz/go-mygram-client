@@ -22,13 +22,15 @@ v1.9（型付き比較フィルタ、ブールクエリモード、ページン�
 
 ## 概要
 
-MygramDB は MySQL FULLTEXT より **25〜200 倍高速** な全文検索を提供します。
+MygramDB は、ディスク上の MySQL FULLTEXT インデックスではなくメモリから全文検索
+に応答します。どれだけ速くなるかはクエリとデータセット次第で、実測値と測定条件は
+[公開ベンチマーク](https://mygramdb.libraz.net/ja/benchmarks)に載せています。
 本クライアントは MygramDB の TCP テキストプロトコル（memcached 形式）を通じて
 通信し、外部依存はゼロです。
 
 | | MySQL FULLTEXT | MygramDB |
 |---|---|---|
-| **検索速度** | 基準 | 25〜200 倍高速 |
+| **検索速度** | 基準 | [実測値](https://mygramdb.libraz.net/ja/benchmarks) |
 | **ストレージ** | ディスク | インメモリ |
 | **レプリケーション** | — | MySQL binlog |
 | **プロトコル** | MySQL | TCP（memcached 形式） |

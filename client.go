@@ -1,7 +1,7 @@
 // Package mygram is a Go client library for the MygramDB full-text search engine.
 //
 // MygramDB is an in-memory full-text search engine using a memcached-style text protocol,
-// providing 25-200x faster search performance compared to MySQL FULLTEXT.
+// answering queries from memory rather than an on-disk MySQL FULLTEXT index.
 //
 // Basic usage:
 //

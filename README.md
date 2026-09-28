@@ -22,11 +22,11 @@ is reported without a code.
 
 ## Overview
 
-MygramDB provides **25-200x faster** full-text search than MySQL FULLTEXT. This client communicates via MygramDB's TCP text protocol (memcached-style) with zero external dependencies.
+MygramDB answers full-text queries from memory instead of an on-disk MySQL FULLTEXT index. How much that gains depends on the query and the dataset; the [published benchmarks](https://mygramdb.libraz.net/benchmarks) give the numbers together with the conditions they were measured under. This client communicates via MygramDB's TCP text protocol (memcached-style) with zero external dependencies.
 
 | | MySQL FULLTEXT | MygramDB |
 |---|---|---|
-| **Search Speed** | Baseline | 25-200x faster |
+| **Search Speed** | Baseline | [Measured](https://mygramdb.libraz.net/benchmarks) |
 | **Storage** | On-disk | In-memory |
 | **Replication** | — | MySQL binlog |
 | **Protocol** | MySQL | TCP (memcached-style) |
