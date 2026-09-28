@@ -25,3 +25,6 @@ coverage.html
 # OS
 .DS_Store
 Thumbs.db
+
+# Serena language-server state
+.serena/
