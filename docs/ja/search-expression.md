@@ -56,9 +56,13 @@ type SimplifiedExpression struct {
 }
 ```
 
-`OR` のみ、または括弧付きの式の場合、部分式全体が単一の括弧付き `MainTerm`
-として表現されます。これにより、呼び出し側が結果を AND 合成しても `OR` の
-意味が保たれます。
+`OR` またはグループ化を含む式は `*ValidationError` として拒否されます。
+`MainTerm`/`AndTerms`/`NotTerms` には論理 `OR` を表現する手段がなく、
+`MainTerm` を利用する側は皆それをワイヤ用に再度引用符で括るため、すでに
+`"(a OR b)"` の形に組み立てられたテキストを不透明な1つのリテラルフレーズに
+してしまい、`OR` として解釈されなくなります。その場合は
+[`ConvertSearchExpression`](#convertsearchexpression) と
+[`SearchRaw`](api-reference.md#searchraw) を使ってください。
 
 ### ConvertSearchExpression
 
@@ -66,21 +70,25 @@ type SimplifiedExpression struct {
 func ConvertSearchExpression(expression string) (string, error)
 ```
 
-式を MygramDB のクエリ文字列に変換します。単純な式は `AND`/`NOT` 形式に
-平坦化され、複雑な式（`OR` やグループ化を含むもの）はそのまま返されて、
-サーバーのブールパーサーが解釈します。
+式を MygramDB のクエリ文字列に変換します。各 term は必要に応じてワイヤ用に
+引用符で括られます — 空、句のキーワードと一致する、あるいは空白・引用符・
+バックスラッシュ・括弧を含む場合です（[補足](#補足)を参照）。単純な式は
+`AND`/`NOT` 形式に平坦化され、`OR` やグループ化を含む式はその部分がブール
+構文のテキストとして括弧で括られ、サーバーのブールパーサーが解釈できる形に
+なります。
 
 ```go
 mygram.ConvertSearchExpression("+golang +tutorial") // "golang AND tutorial"
-mygram.ConvertSearchExpression("+golang -old")      // "golang NOT old"
-mygram.ConvertSearchExpression("python OR ruby")    // "python OR ruby"
+mygram.ConvertSearchExpression("+golang -old")      // "golang AND NOT old"
+mygram.ConvertSearchExpression("python OR ruby")    // "(python OR ruby)"
+mygram.ConvertSearchExpression("golang not")        // `golang AND "not"` — 単独の "not" は NOT キーワードと衝突する
 ```
 
 結果を [`SearchRaw`](api-reference.md#searchraw) に渡すと、`Search` の AND/NOT
 分解では表現できないブールクエリを実行できます。
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 ```
 
@@ -95,10 +103,10 @@ func ParseSearchExpression(expression string) (*SearchExpression, error)
 
 ```go
 type SearchExpression struct {
-    RequiredTerms []string // terms marked with +
+    RequiredTerms []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
     ExcludedTerms []string // terms marked with -
-    OptionalTerms []string // terms without a modifier
-    RawExpression string   // original expression when it contains OR/grouping
+    OptionalTerms []string // unused; kept for source compatibility
+    RawExpression string   // reconstructed boolean-syntax text for a bare OR chain or group, already wire-quoted
 }
 ```
 
@@ -117,8 +125,9 @@ term に簡約できないか）を報告します。
 func ToQueryString(expr *SearchExpression) string
 ```
 
-解析済みの `SearchExpression` を MygramDB のクエリ文字列に戻します。複雑な式は
-元の生の形をそのまま返します。
+解析済みの `SearchExpression` を MygramDB のクエリ文字列に戻します。
+`ConvertSearchExpression` と同じ term ごとのワイヤ用引用符付け判断が適用されます。
+空でない `RawExpression` は括弧で括られ、必須/除外の term と AND で結合されます。
 
 ## 適切な経路の選択
 
@@ -207,9 +216,18 @@ resp, _ := client.Search("articles", "hello world", mygram.SearchOptions{
 ## 補足
 
 - `"hello world"` のような引用符付きフレーズは1つの term として解析されます
-  （外側の引用符は取り除かれます）。クライアントはワイヤコマンドを組み立てる際に
-  空白を含む term を引用符で括り直すため、サーバーは引き続き完全一致のフレーズ
-  として受け取ります。
+  （外側の引用符は取り除かれます）。フレーズを開始できるのは `"` だけで、
+  アポストロフィ（`don't`）は term 内のリテラル文字として扱われ、引用符の
+  開始とはみなされません。`OR` は大文字小文字を区別せず単語単位で認識され
+  ます（`or`、`Or`、`OR`）。
+- term は、空である、句のキーワード（`AND`、`OR`、`NOT`、`FILTER`、`SORT`、
+  `LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、`FACET`、`ORDER` のいずれかと
+  大文字小文字を区別せず一致する）、あるいは ASCII/Unicode の空白、`"`、
+  `'`、`\`、`(`、`)` のいずれかを含む場合にワイヤ上で引用符付けされます。
+  呼び出し側は常に生の未引用テキストを渡せばよく、引用符付けは自動的かつ
+  可逆的に行われます。
+- 括弧付きグループ内の `-` はリテラルな単語 `NOT` としてレンダリングされます。
+  サーバーのブールパーサーには単独の `-` に対応する演算子の意味がないためです。
 - パーサーは、対応の取れない括弧や閉じられていない引用符をエラーとして拒否
   します。信頼できない入力の解析はそれに応じてラップしてください。
 - クライアント経由で送られる入力は、サーバーに届く前に制御文字と長さが検証

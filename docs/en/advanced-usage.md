@@ -416,7 +416,7 @@ server tokenizes it and parses `AND` / `OR` / `NOT` / parentheses, including
 `ConvertSearchExpression`:
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 
 // Snippet-returning variant:

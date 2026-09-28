@@ -55,9 +55,13 @@ type SimplifiedExpression struct {
 }
 ```
 
-For an `OR`-only or parenthesized expression, the whole sub-expression is
-surfaced as a single parenthesized `MainTerm` so the `OR` semantics survive when
-the caller AND-composes the result.
+An expression containing `OR` or grouping is rejected with a
+`*ValidationError`: `MainTerm`/`AndTerms`/`NotTerms` has no way to represent
+boolean `OR`, and every consumer of `MainTerm` re-quotes it for the wire,
+which would turn an already-formatted `"(a OR b)"` into one opaque literal
+phrase instead of parsing as `OR`. Use
+[`ConvertSearchExpression`](#convertsearchexpression) with
+[`SearchRaw`](api-reference.md#searchraw) for that case instead.
 
 ### ConvertSearchExpression
 
@@ -65,21 +69,25 @@ the caller AND-composes the result.
 func ConvertSearchExpression(expression string) (string, error)
 ```
 
-Converts an expression into a MygramDB query string. Simple expressions are
-flattened into `AND`/`NOT` form; complex ones (containing `OR` or grouping) are
-returned verbatim so the server's boolean parser can interpret them.
+Converts an expression into a MygramDB query string. Every term is quoted for
+the wire as needed — empty, equal to a clause keyword, or containing
+whitespace, a quote, a backslash or a parenthesis (see [Notes](#notes)).
+Simple expressions flatten into `AND`/`NOT` form; an expression containing
+`OR` or grouping renders that part as boolean-syntax text wrapped in
+parentheses, so the server's boolean parser can interpret it.
 
 ```go
 mygram.ConvertSearchExpression("+golang +tutorial") // "golang AND tutorial"
-mygram.ConvertSearchExpression("+golang -old")      // "golang NOT old"
-mygram.ConvertSearchExpression("python OR ruby")    // "python OR ruby"
+mygram.ConvertSearchExpression("+golang -old")      // "golang AND NOT old"
+mygram.ConvertSearchExpression("python OR ruby")    // "(python OR ruby)"
+mygram.ConvertSearchExpression("golang not")        // `golang AND "not"` — "not" alone collides with the NOT keyword
 ```
 
 Pass the result to [`SearchRaw`](api-reference.md#searchraw) to run a boolean
 query that `Search`'s AND/NOT decomposition cannot express:
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 ```
 
@@ -94,10 +102,10 @@ classified terms directly.
 
 ```go
 type SearchExpression struct {
-    RequiredTerms []string // terms marked with +
+    RequiredTerms []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
     ExcludedTerms []string // terms marked with -
-    OptionalTerms []string // terms without a modifier
-    RawExpression string   // original expression when it contains OR/grouping
+    OptionalTerms []string // unused; kept for source compatibility
+    RawExpression string   // reconstructed boolean-syntax text for a bare OR chain or group, already wire-quoted
 }
 ```
 
@@ -116,8 +124,10 @@ simplified into plain AND/NOT terms).
 func ToQueryString(expr *SearchExpression) string
 ```
 
-Renders a parsed `SearchExpression` back into a MygramDB query string. Complex
-expressions return their original raw form.
+Renders a parsed `SearchExpression` back into a MygramDB query string,
+applying the same per-term wire-quoting decision as `ConvertSearchExpression`.
+A non-empty `RawExpression` is wrapped in parentheses and AND-combined with
+any required/excluded terms.
 
 ## Choosing the Right Path
 
@@ -206,9 +216,17 @@ resp, _ := client.Search("articles", "hello world", mygram.SearchOptions{
 ## Notes
 
 - A quoted phrase such as `"hello world"` is parsed into a single term (the
-  surrounding quotes are stripped). When the client builds the wire command it
-  re-quotes any term containing whitespace, so the server still receives it as
-  one exact phrase.
+  surrounding quotes are stripped). Only `"` opens a phrase — an apostrophe
+  (`don't`) stays literal text within a term rather than starting a quote.
+  `OR` is recognized as a whole word case-insensitively (`or`, `Or`, `OR`).
+- A term is quoted on the wire when it is empty, equal to a clause keyword
+  (`AND`, `OR`, `NOT`, `FILTER`, `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`,
+  `FUZZY`, `FACET`, `ORDER`, matched case-insensitively), or contains ASCII or
+  Unicode whitespace, `"`, `'`, `\`, `(` or `)`. Callers always pass raw,
+  unquoted text — quoting is automatic and reversible on the way back out of
+  a response.
+- A `-` inside a parenthesized group renders as the literal word `NOT`,
+  since the server's boolean parser has no operator meaning for a bare `-`.
 - The parser rejects unbalanced parentheses and unclosed quotes with an error;
   wrap parsing of untrusted input accordingly.
 - Input sent through the client is validated for control characters and length

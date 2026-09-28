@@ -414,7 +414,7 @@ db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articl
 `ConvertSearchExpression` と組み合わせて使います。
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 
 // Snippet-returning variant:

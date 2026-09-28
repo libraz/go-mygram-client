@@ -10,7 +10,7 @@
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-Compatible with MygramDB v1.10 (administrative `AUTH`, numeric error codes with
+Compatible with MygramDB v1.10.2 (administrative `AUTH`, numeric error codes with
 code-driven retries, readiness in `INFO`, the full `CACHE STATS` surface,
 separate budgets for long-running commands), v1.9 (typed comparison filters,
 boolean query mode, paginated facets, primary-key ordering), v1.8 (unquoted raw boolean transport with
@@ -19,6 +19,27 @@ tables, raw boolean search, runtime variables, on-demand sync), and v1.6 (BM25
 scoring, HIGHLIGHT, FUZZY, FACET). Older servers stay supported: features the
 server does not implement are simply not requested, and an uncoded `ERROR` frame
 is reported without a code.
+
+## MygramDB v1.10.2
+
+- **One quoting rule for every wire-bound string** — search terms, filter
+  values, AND/NOT terms, highlight tags and primary keys are all quoted by
+  the same decision: empty, a clause keyword (case-insensitive), ASCII or
+  Unicode whitespace, a control character, a quote, a backslash, or a
+  parenthesis. Callers always pass raw, unquoted text; a highlight tag that
+  needs quoting is quoted rather than rejected. See
+  [Search Expressions](docs/en/search-expression.md#notes) for the exact rule.
+- **Quoted primary keys and `GET` string values are decoded** on the way
+  back, so a `SEARCH` or `GET` result whose primary key or a string field
+  contains a space round-trips intact instead of being split.
+- **IPv6 servers are reachable** by a literal address (`"[::1]:11016"`) or a
+  hostname that resolves only to an AAAA record.
+- **Multi-line `HIGHLIGHT`, `DEBUG` and `SHOW VARIABLES` responses are read
+  completely**, even when a chunk boundary lands exactly at the header line
+  a single-line reply would also end at.
+- **`SimplifySearchExpression` rejects an `OR` or grouped expression**
+  instead of silently misrepresenting it as a single main term. Use
+  `ConvertSearchExpression` with `SearchRaw` for that case.
 
 ## Overview
 

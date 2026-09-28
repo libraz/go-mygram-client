@@ -28,6 +28,9 @@ func NewClientWithConfig(config ClientConfig) *Client
 `NewClient` parses `addr` as `host:port`, or treats it as a Unix socket path if
 it is not in that form. `NewClientWithConfig` fills any zero-valued
 [`ClientConfig`](#clientconfig) field with its default. Neither performs I/O.
+An IPv6 literal host is written bracketed, e.g. `"[::1]:11016"` for `NewClient`
+or `Host: "::1"` for `NewClientWithConfig` — `dial` re-brackets it with
+`net.JoinHostPort` before connecting either way.
 
 ### Connection
 
@@ -107,7 +110,7 @@ grouping that `Search`'s AND/NOT decomposition cannot express.
 `SearchRawWithHighlights` adds the `HIGHLIGHT` clause.
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 ```
 
@@ -138,7 +141,10 @@ func (c *Client) Get(table, primaryKey string) (*Document, error)
 
 Retrieves a single document by primary key. The key is escaped reversibly, so
 any key the server can return can be sent back to it — including one holding
-spaces or quotes. Returns a `*ProtocolError` (or `*ServerError`) when the
+spaces or quotes. `Document.PrimaryKey`, `Document.Fields`' string-typed
+values, and `SearchResult.PrimaryKey` are decoded the same way on the way
+back in, so a key or field value containing a space survives a `Search`/`Get`
+round trip intact. Returns a `*ProtocolError` (or `*ServerError`) when the
 document does not exist.
 
 ### Server Information
@@ -409,6 +415,10 @@ type HighlightOptions struct {
 ```
 
 A zero-value `&HighlightOptions{}` enables highlighting with server defaults.
+`OpenTag` and `CloseTag` are quoted on the wire automatically (the same
+decision `Search` applies to terms and filter values), so a tag containing
+whitespace or matching a clause keyword still reaches the server as the
+literal tag it was configured as.
 
 ### SearchRawOptions
 

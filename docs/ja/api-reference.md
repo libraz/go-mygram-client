@@ -28,7 +28,10 @@ func NewClientWithConfig(config ClientConfig) *Client
 `NewClient` は `addr` を `host:port` として解析し、その形式でなければ Unix
 ソケットのパスとして扱います。`NewClientWithConfig` は
 [`ClientConfig`](#clientconfig) のゼロ値フィールドをそれぞれのデフォルト値で
-補完します。どちらも I/O は行いません。
+補完します。どちらも I/O は行いません。IPv6 のリテラルホストは角括弧付きで
+書きます。`NewClient` なら `"[::1]:11016"`、`NewClientWithConfig` なら
+`Host: "::1"` です — どちらの経路でも接続前に `dial` が `net.JoinHostPort`
+で角括弧を付け直します。
 
 ### 接続
 
@@ -110,7 +113,7 @@ resp, err := client.Search("articles", "alpha AND (beta OR gamma)", mygram.Searc
 `SearchRawWithHighlights` は `HIGHLIGHT` 句を追加します。
 
 ```go
-raw, _ := mygram.ConvertSearchExpression("python OR (ruby AND rails)")
+raw, _ := mygram.ConvertSearchExpression("python OR (ruby rails)")
 resp, _ := client.SearchRaw("articles", raw, mygram.SearchRawOptions{Limit: 50})
 ```
 
@@ -141,8 +144,10 @@ func (c *Client) Get(table, primaryKey string) (*Document, error)
 
 主キーで単一のドキュメントを取得します。主キーは可逆的にエスケープされるため、
 空白や引用符を含むものも含めて、サーバーが返せる主キーはそのまま送り返せます。
-ドキュメントが存在しない場合は `*ProtocolError`（または `*ServerError`）を
-返します。
+`Document.PrimaryKey`、`Document.Fields` の文字列型の値、`SearchResult.PrimaryKey`
+は戻ってくる際も同じ方式でデコードされるため、空白を含む主キーやフィールド値
+も `Search`/`Get` の往復でそのまま保たれます。ドキュメントが存在しない場合は
+`*ProtocolError`（または `*ServerError`）を返します。
 
 ### サーバー情報
 
@@ -412,6 +417,9 @@ type HighlightOptions struct {
 ```
 
 ゼロ値の `&HighlightOptions{}` は、サーバーのデフォルトでハイライトを有効にします。
+`OpenTag` と `CloseTag` は自動的にワイヤ用の引用符で括られます（`Search` が term
+やフィルタ値に適用するのと同じ判断です）。そのため空白を含むタグや句のキーワード
+と一致するタグでも、設定したとおりのリテラルなタグとしてサーバーに届きます。
 
 ### SearchRawOptions
 
