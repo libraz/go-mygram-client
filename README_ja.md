@@ -3,16 +3,16 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/go-mygram-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/go-mygram-client/actions)
 [![Go Reference](https://pkg.go.dev/badge/github.com/libraz/go-mygram-client.svg)](https://pkg.go.dev/github.com/libraz/go-mygram-client)
 [![codecov](https://codecov.io/gh/libraz/go-mygram-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/go-mygram-client)
-[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ACD7?logo=go)](https://golangci-lint.run/)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://pkg.go.dev/github.com/libraz/go-mygram-client?tab=imports)
 
 [MygramDB](https://github.com/libraz/mygram-db/) 用の Go クライアントライブラリです。MygramDB は MySQL レプリケーションに対応した高性能なインメモリ全文検索エンジンです。
 
-**対応サーバー:** MygramDB 1.6 以降に対応し、1.10.2 までのプロトコルを実装しています。サーバーは自身より新しいオプションを拒否し、古いサーバーの `ERROR` には数値コードが付きません。新しいサーバーを必要とするオプションは [API リファレンス](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/api-reference.md)に明記しています。
+**対応サーバー:** MygramDB 1.6 以降に対応し、1.10.2 までのプロトコルを実装しています。サーバーは自身より新しいオプションを拒否し、古いサーバーの `ERROR` には数値コードが付きません。新しいサーバーを必要とするオプションは [API リファレンス](docs/ja/api-reference.md)に明記しています。
 
-<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/request-path-ja.svg" alt="検索の呼び出しがアプリケーションからクライアントの検証とクォート処理を経て TCP で MygramDB サーバーに届き、応答がデコードされて戻る流れと、MySQL が binlog レプリケーションでサーバーを更新する関係を示した図です。" width="960">
+<img src="docs/images/request-path-ja.svg" alt="検索の呼び出しがアプリケーションからクライアントの検証とクォート処理を経て TCP で MygramDB サーバーに届き、応答がデコードされて戻る流れと、MySQL が binlog レプリケーションでサーバーを更新する関係を示した図です。" width="960">
 
 ## 概要
 
@@ -108,13 +108,13 @@ defer pool.Close()
 resp, err := pool.Search("articles", "hello", mygram.SearchOptions{Limit: 100})
 ```
 
-すべての接続が使用中のとき、呼び出しは接続が返却されるか `context` がキャンセルされるまでブロックします。これがそのままバックプレッシャーになります。サイジング、リトライの挙動、モニタリングは[コネクションプール](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/advanced-usage.md#コネクションプール)を参照してください。
+すべての接続が使用中のとき、呼び出しは接続が返却されるか `context` がキャンセルされるまでブロックします。これがそのままバックプレッシャーになります。サイジング、リトライの挙動、モニタリングは[コネクションプール](docs/ja/advanced-usage.md#コネクションプール)を参照してください。
 
 ## 検索式
 
 `ConvertSearchExpression` は Web 形式の入力をサーバーのブールクエリに変換します。接頭辞のない語と `+` の語は `AND` で結合され、`-` の語は `AND NOT` になり、OR の連なりは括弧で囲まれたまま残ります。
 
-<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/search-expression-ja.svg" alt="Web 形式の入力 golang &quot;machine learning&quot; -php +(tutorial OR guide) を 4 つの項に分け、サーバーへ送るクエリ golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php に組み立てる過程を示した図です。" width="960">
+<img src="docs/images/search-expression-ja.svg" alt="Web 形式の入力 golang &quot;machine learning&quot; -php +(tutorial OR guide) を 4 つの項に分け、サーバーへ送るクエリ golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php に組み立てる過程を示した図です。" width="960">
 
 `Search` はクエリをリテラルテキストとして送るため、ブール式は `SearchRaw` で送ります。フィルタ、ソート、あいまい検索、ハイライトも組み合わせる場合は、`Search` に `QueryMode: mygram.QueryBoolean` を指定します。
 
@@ -242,7 +242,7 @@ db, tbl, _ := mygram.ParseTableIdentity("app_db.articles")  // "app_db", "articl
 
 ## ワイヤー上のクォート
 
-検索語、フィルタ値、AND/NOT の項、ハイライトタグ、主キーは、すべて同じクォート判定を通ります。空の値、句のキーワード（大文字小文字を区別しません）、ASCII または Unicode の空白・制御文字・引用符・バックスラッシュ・括弧を含む値はクォートされます。呼び出し側は常にクォートなしの生のテキストを渡します。クォートが必要なハイライトタグも拒否されず、クォートして送られます。正確な規則は[検索式](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/search-expression.md#補足)を参照してください。
+検索語、フィルタ値、AND/NOT の項、ハイライトタグ、主キーは、すべて同じクォート判定を通ります。空の値、句のキーワード（大文字小文字を区別しません）、ASCII または Unicode の空白・制御文字・引用符・バックスラッシュ・括弧を含む値はクォートされます。呼び出し側は常にクォートなしの生のテキストを渡します。クォートが必要なハイライトタグも拒否されず、クォートして送られます。正確な規則は[検索式](docs/ja/search-expression.md#補足)を参照してください。
 
 ```go
 // 全角スペースは 1 つの項の中に残ります。
@@ -321,10 +321,10 @@ _, _ = client.SyncStop("app_db.articles")
 
 ## ドキュメント
 
-- [はじめに](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/getting-started.md) — インストール、設定、エラー処理
-- [検索式](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/search-expression.md) — Web 形式の検索入力のパースと変換
-- [API リファレンス](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/api-reference.md) — すべてのメソッド、オプション、型
-- [高度な使い方](https://github.com/libraz/go-mygram-client/blob/main/docs/ja/advanced-usage.md) — コネクションプール、レジリエンス、認証、エラーコード
+- [はじめに](docs/ja/getting-started.md) — インストール、設定、エラー処理
+- [検索式](docs/ja/search-expression.md) — Web 形式の検索入力のパースと変換
+- [API リファレンス](docs/ja/api-reference.md) — すべてのメソッド、オプション、型
+- [高度な使い方](docs/ja/advanced-usage.md) — コネクションプール、レジリエンス、認証、エラーコード
 
 パッケージレベルの API ドキュメントは [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client) にあります。
 
@@ -363,8 +363,8 @@ MYGRAM_E2E_SKIP_DUMP=1 MYGRAM_E2E_SKIP_REPLICATION=1 make test-e2e
 
 #### 自己完結型の docker-compose スタック
 
-`make test-e2e-docker` は使い捨ての **MySQL + MygramDB** スタック（サーバーは `ghcr.io/libraz/mygram-db` から取得）を起動し、決定論的なデータセットを投入し、`MYGRAM_E2E_SEEDED=1` で e2e スイートを実行してから、すべてを撤去します。ローカルサーバーは不要です。設定項目（`MYGRAMDB_VERSION`、`MYGRAM_ADMIN_TOKEN`、`KEEP_UP`、ポート）は [`e2e/docker/`](https://github.com/libraz/go-mygram-client/blob/main/e2e/docker/README.md) を参照してください。`TestE2ESeeded` ブロックは正確な結果セット（データベース修飾識別子、フレーズと必須フィルタの可視性、日本語 ngram マッチング、`SearchRaw` の OR、ファセット数とページング、比較フィルタ、ブールクエリモード）を検証します。
+`make test-e2e-docker` は使い捨ての **MySQL + MygramDB** スタック（サーバーは `ghcr.io/libraz/mygram-db` から取得）を起動し、決定論的なデータセットを投入し、`MYGRAM_E2E_SEEDED=1` で e2e スイートを実行してから、すべてを撤去します。ローカルサーバーは不要です。設定項目（`MYGRAMDB_VERSION`、`MYGRAM_ADMIN_TOKEN`、`KEEP_UP`、ポート）は [`e2e/docker/`](e2e/docker/README.md) を参照してください。`TestE2ESeeded` ブロックは正確な結果セット（データベース修飾識別子、フレーズと必須フィルタの可視性、日本語 ngram マッチング、`SearchRaw` の OR、ファセット数とページング、比較フィルタ、ブールクエリモード）を検証します。
 
 ## ライセンス
 
-[MIT](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)
+[MIT](LICENSE)

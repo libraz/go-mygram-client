@@ -3,16 +3,16 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/libraz/go-mygram-client/ci.yml?branch=main&label=CI)](https://github.com/libraz/go-mygram-client/actions)
 [![Go Reference](https://pkg.go.dev/badge/github.com/libraz/go-mygram-client.svg)](https://pkg.go.dev/github.com/libraz/go-mygram-client)
 [![codecov](https://codecov.io/gh/libraz/go-mygram-client/branch/main/graph/badge.svg)](https://codecov.io/gh/libraz/go-mygram-client)
-[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Go](https://img.shields.io/badge/go-%E2%89%A51.26-00ADD8?logo=go)](https://go.dev/)
 [![golangci-lint](https://img.shields.io/badge/lint-golangci--lint-00ACD7?logo=go)](https://golangci-lint.run/)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](https://pkg.go.dev/github.com/libraz/go-mygram-client?tab=imports)
 
 Go client library for [MygramDB](https://github.com/libraz/mygram-db/) — a high-performance in-memory full-text search engine with MySQL replication support.
 
-**Server compatibility:** MygramDB 1.6 or later, with the protocol implemented through 1.10.2. A server rejects options it predates, and an older server's `ERROR` frames carry no numeric code; the [API reference](https://github.com/libraz/go-mygram-client/blob/main/docs/en/api-reference.md) marks each option that needs a newer server.
+**Server compatibility:** MygramDB 1.6 or later, with the protocol implemented through 1.10.2. A server rejects options it predates, and an older server's `ERROR` frames carry no numeric code; the [API reference](docs/en/api-reference.md) marks each option that needs a newer server.
 
-<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/request-path.svg" alt="A search call passing from the application through the client's validation and wire-quoting steps to the MygramDB server over TCP, with the response decoded on the way back and MySQL feeding the server through binlog replication." width="960">
+<img src="docs/images/request-path.svg" alt="A search call passing from the application through the client's validation and wire-quoting steps to the MygramDB server over TCP, with the response decoded on the way back and MySQL feeding the server through binlog replication." width="960">
 
 ## Overview
 
@@ -113,7 +113,7 @@ resp, err := pool.Search("articles", "hello", mygram.SearchOptions{Limit: 100})
 
 When every connection is busy, a call blocks until one is returned or its
 `context` is canceled — a natural backpressure signal. See
-[Connection Pooling](https://github.com/libraz/go-mygram-client/blob/main/docs/en/advanced-usage.md#connection-pooling)
+[Connection Pooling](docs/en/advanced-usage.md#connection-pooling)
 for sizing, retry semantics, and monitoring.
 
 ## Search Expressions
@@ -122,7 +122,7 @@ for sizing, retry semantics, and monitoring.
 unprefixed terms and `+` terms are joined with `AND`, `-` terms become
 `AND NOT`, and an OR chain stays in parentheses.
 
-<img src="https://raw.githubusercontent.com/libraz/go-mygram-client/main/docs/images/search-expression.svg" alt="The web-syntax input golang &quot;machine learning&quot; -php +(tutorial OR guide) split into four terms and joined into the server query golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php." width="960">
+<img src="docs/images/search-expression.svg" alt="The web-syntax input golang &quot;machine learning&quot; -php +(tutorial OR guide) split into four terms and joined into the server query golang AND &quot;machine learning&quot; AND (tutorial OR guide) AND NOT php." width="960">
 
 `Search` sends its query as literal text, so a boolean expression goes through
 `SearchRaw`, or through `Search` with `QueryMode: mygram.QueryBoolean` when it
@@ -266,7 +266,7 @@ clause keyword (matched case-insensitively), or contains ASCII or Unicode
 whitespace, a control character, a quote, a backslash, or a parenthesis.
 Callers always pass raw, unquoted text; a highlight tag that needs quoting is
 quoted rather than rejected. See
-[Search Expressions](https://github.com/libraz/go-mygram-client/blob/main/docs/en/search-expression.md#notes)
+[Search Expressions](docs/en/search-expression.md#notes)
 for the exact rule.
 
 ```go
@@ -360,10 +360,10 @@ _, _ = client.SyncStop("app_db.articles")
 
 ## Documentation
 
-- [Getting Started](https://github.com/libraz/go-mygram-client/blob/main/docs/en/getting-started.md) — install, configuration, and error handling
-- [Search Expressions](https://github.com/libraz/go-mygram-client/blob/main/docs/en/search-expression.md) — parse and convert web-style search input
-- [API Reference](https://github.com/libraz/go-mygram-client/blob/main/docs/en/api-reference.md) — every method, option, and type
-- [Advanced Usage](https://github.com/libraz/go-mygram-client/blob/main/docs/en/advanced-usage.md) — connection pooling, resilience, authentication, and error codes
+- [Getting Started](docs/en/getting-started.md) — install, configuration, and error handling
+- [Search Expressions](docs/en/search-expression.md) — parse and convert web-style search input
+- [API Reference](docs/en/api-reference.md) — every method, option, and type
+- [Advanced Usage](docs/en/advanced-usage.md) — connection pooling, resilience, authentication, and error codes
 
 Package-level API docs are on [pkg.go.dev](https://pkg.go.dev/github.com/libraz/go-mygram-client).
 
@@ -409,7 +409,7 @@ toggle, dump round-trip) restore the original state on exit.
 `make test-e2e-docker` brings up a throwaway **MySQL + MygramDB** stack (the
 server is pulled from `ghcr.io/libraz/mygram-db`), seeds it with a deterministic
 dataset, runs the e2e suite with `MYGRAM_E2E_SEEDED=1`, then tears everything
-down. No local server is required. See [`e2e/docker/`](https://github.com/libraz/go-mygram-client/blob/main/e2e/docker/README.md) for
+down. No local server is required. See [`e2e/docker/`](e2e/docker/README.md) for
 knobs (`MYGRAMDB_VERSION`, `MYGRAM_ADMIN_TOKEN`, `KEEP_UP`, ports). The
 `TestE2ESeeded` block asserts exact result sets (database-qualified identity,
 phrase + required-filter visibility, Japanese ngram matching, `SearchRaw` OR,
@@ -417,4 +417,4 @@ facet counts and pagination, comparison filters, boolean query mode).
 
 ## License
 
-[MIT](https://github.com/libraz/go-mygram-client/blob/main/LICENSE)
+[MIT](LICENSE)
