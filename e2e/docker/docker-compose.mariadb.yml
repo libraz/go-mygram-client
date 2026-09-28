@@ -1,0 +1,70 @@
+# Self-contained e2e stack for the MygramDB Go client — MariaDB flavor.
+#
+# Same shape as docker-compose.yml with a MariaDB service in place of MySQL.
+# Selected by DB_FLAVOR=mariadb in e2e/docker/run-e2e.sh, or driven across the
+# whole version matrix by e2e/docker/run-matrix.sh.
+#
+#   DB_FLAVOR=mariadb docker compose -f e2e/docker/docker-compose.mariadb.yml up -d --wait
+#   MYGRAM_E2E_SEEDED=1 go test -tags=e2e -count=1 ./...
+#   docker compose -f e2e/docker/docker-compose.mariadb.yml down -v
+#
+# Override the server version with MYGRAMDB_VERSION, the MariaDB version with
+# MARIADB_VERSION (defaults to the 11.8 LTS line), and the administrative
+# token with MYGRAM_ADMIN_TOKEN.
+
+# Same project name as docker-compose.yml so `down -v --remove-orphans` on
+# either file cleans up a leftover stack from the other flavor too.
+name: go-mygram-e2e
+
+services:
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-test_root_password}
+      MARIADB_DATABASE: testdb
+      MARIADB_USER: repl_user
+      MARIADB_PASSWORD: test_password
+    command:
+      - --server-id=1
+      - --log-bin=mariadb-bin
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      # mariadb-init mirrors mysql-init's table shape but skips the FULLTEXT
+      # ngram index — MariaDB has no ngram parser plugin.
+      - ./mariadb-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+
+  mygramdb:
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.2}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      # Use the mounted config verbatim instead of the image's env-based generator.
+      SKIP_CONFIG_GEN: "true"
+      # The image requires a replication password from v1.10 rather than
+      # substituting a placeholder that would only surface later as an error.
+      MYSQL_PASSWORD: test_password
+      # Overrides api.admin_token in the mounted config, so the token lives in
+      # one place for both the server and the test run.
+      MYGRAM_API_ADMIN_TOKEN: ${MYGRAM_ADMIN_TOKEN:-e2e_admin_token}
+    command: ["mygramdb", "-c", "/etc/mygramdb/config.yaml"]
+    volumes:
+      - ./mygramdb-mariadb.yaml:/etc/mygramdb/config.yaml:ro
+    ports:
+      - "${MYGRAM_PORT:-11016}:11016"   # TCP protocol (used by the client)
+      - "${MYGRAM_HTTP_PORT:-18080}:8080"  # HTTP API / health probes
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s

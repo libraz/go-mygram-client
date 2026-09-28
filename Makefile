@@ -1,4 +1,4 @@
-.PHONY: all test test-race test-e2e test-e2e-docker lint fmt format vet check coverage clean
+.PHONY: all test test-race test-e2e test-e2e-docker test-e2e-matrix lint fmt format vet check coverage clean
 
 all: check test
 
@@ -17,12 +17,17 @@ test-race:
 test-e2e:
 	go test -tags=e2e -count=1 -v ./...
 
-# Spin up a throwaway MySQL + MygramDB stack (docker compose), run the e2e
-# suite against it with the deterministic seed, then tear it down.
-# Knobs: MYGRAMDB_VERSION, MYSQL_VERSION, MYGRAM_PORT, MYGRAM_HTTP_PORT,
-#        MYGRAM_ADMIN_TOKEN, KEEP_UP.
+# Spin up a throwaway MySQL/MariaDB + MygramDB stack (docker compose), run the
+# e2e suite against it with the deterministic seed, then tear it down.
+# Knobs: MYGRAMDB_VERSION, DB_FLAVOR, MYSQL_VERSION, MARIADB_VERSION,
+#        MYGRAM_PORT, MYGRAM_HTTP_PORT, MYGRAM_ADMIN_TOKEN, KEEP_UP.
 test-e2e-docker:
 	bash e2e/docker/run-e2e.sh
+
+# Run the full e2e suite once per database version target, sequentially,
+# tearing the stack down between each. Knobs: --only mysql:8.4,mariadb:11.8
+test-e2e-matrix:
+	bash e2e/docker/run-matrix.sh
 
 lint:
 	golangci-lint run ./...

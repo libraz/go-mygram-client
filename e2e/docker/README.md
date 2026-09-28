@@ -30,7 +30,9 @@ adopt that stack's `mysql` service and `down -v` tear it down.
 | Variable | Default | Purpose |
 |---|---|---|
 | `MYGRAMDB_VERSION` | `1.10.2` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.10`, `latest`) |
-| `MYSQL_VERSION` | `8.4` | MySQL image tag |
+| `DB_FLAVOR` | `mysql` | `mysql` or `mariadb`; selects the compose file and seed database |
+| `MYSQL_VERSION` | `8.4` | MySQL image tag (used when `DB_FLAVOR=mysql`) |
+| `MARIADB_VERSION` | `11.8` | MariaDB image tag (used when `DB_FLAVOR=mariadb`) |
 | `MYGRAM_PORT` | `11016` | Host port mapped to the server's TCP API |
 | `MYGRAM_HTTP_PORT` | `18080` | Host port mapped to the server's HTTP/health API |
 | `MYGRAM_ADMIN_TOKEN` | `e2e_admin_token` | Administrative token; passed to the server and to the tests |
@@ -38,8 +40,25 @@ adopt that stack's `mysql` service and `down -v` tear it down.
 
 ```bash
 MYGRAMDB_VERSION=latest make test-e2e-docker
+DB_FLAVOR=mariadb make test-e2e-docker   # against MariaDB instead of MySQL
 KEEP_UP=1 make test-e2e-docker     # inspect the running stack afterwards
 ```
+
+## Database version matrix
+
+```bash
+# Run the full suite once per target below, sequentially, tearing the stack
+# down between each. Non-zero exit if any target fails.
+make test-e2e-matrix
+
+# Only a subset
+bash e2e/docker/run-matrix.sh --only mysql:8.4,mariadb:11.8
+```
+
+Targets (mirrors the server's own `e2e/run-matrix.sh`): `mysql:8.4`, `mysql:9.7`,
+`mariadb:10.11`, `mariadb:11.8`, `mariadb:12.3`. Every entry is a supported LTS;
+innovation releases are superseded by the next one a quarter later, so they are
+reached with `--only` rather than carried in the default list.
 
 ## What it exercises
 
@@ -100,7 +119,12 @@ address rather than the host's.
 ## Files
 
 - `docker-compose.yml` — MySQL + MygramDB services
+- `docker-compose.mariadb.yml` — MariaDB + MygramDB services (`DB_FLAVOR=mariadb`)
 - `mygramdb.yaml` — server config (replicates `testdb` from the `mysql` service)
+- `mygramdb-mariadb.yaml` — same config, pointed at the `mariadb` service
 - `mysql-init/01-schema.sql` — schema + replication grants
 - `mysql-init/02-seed.sql` — deterministic dataset
+- `mariadb-init/01-schema.sql` — same schema minus the MySQL-only FULLTEXT ngram index
+- `mariadb-init/02-seed.sql` — same deterministic dataset
 - `run-e2e.sh` — orchestrates up → test → down (used by `make test-e2e-docker`)
+- `run-matrix.sh` — runs `run-e2e.sh` once per database version target (used by `make test-e2e-matrix`)

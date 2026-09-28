@@ -1,19 +1,33 @@
 #!/usr/bin/env bash
 #
-# Run the closed-loop e2e suite against a throwaway MygramDB + MySQL stack.
+# Run the closed-loop e2e suite against a throwaway MygramDB + MySQL/MariaDB stack.
 #
 # Usage:
 #   e2e/docker/run-e2e.sh            # up -> go test -tags=e2e -> down -v
 #   MYGRAMDB_VERSION=latest e2e/docker/run-e2e.sh
+#   DB_FLAVOR=mariadb e2e/docker/run-e2e.sh   # against MariaDB instead of MySQL
 #   KEEP_UP=1 e2e/docker/run-e2e.sh  # leave the stack running for debugging
 #
+# e2e/docker/run-matrix.sh drives this script across the full database
+# version matrix.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# DB_FLAVOR selects which compose file and seed database run: "mysql"
+# (default) or "mariadb".
+DB_FLAVOR="${DB_FLAVOR:-mysql}"
+if [ "${DB_FLAVOR}" = "mariadb" ]; then
+  COMPOSE_FILE="docker-compose.mariadb.yml"
+  DB_SERVICE="mariadb"
+else
+  COMPOSE_FILE="docker-compose.yml"
+  DB_SERVICE="mysql"
+fi
 # -p pins the project even if the compose file is ever invoked from a context
 # that overrides it, so teardown can never reach an unrelated stack.
-COMPOSE=(docker compose -p go-mygram-e2e -f "${SCRIPT_DIR}/docker-compose.yml")
+COMPOSE=(docker compose -p go-mygram-e2e -f "${SCRIPT_DIR}/${COMPOSE_FILE}")
 
 MYGRAM_PORT="${MYGRAM_PORT:-11016}"
 MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT:-18080}"
@@ -29,8 +43,8 @@ AUTH_MIN_VERSION='1.10.0'
 dump_logs() {
   echo "---- mygramdb logs ----" >&2
   "${COMPOSE[@]}" logs --no-log-prefix mygramdb >&2 2>&1 || true
-  echo "---- mysql logs (tail) ----" >&2
-  "${COMPOSE[@]}" logs --no-log-prefix --tail 30 mysql >&2 2>&1 || true
+  echo "---- ${DB_SERVICE} logs (tail) ----" >&2
+  "${COMPOSE[@]}" logs --no-log-prefix --tail 30 "${DB_SERVICE}" >&2 2>&1 || true
 }
 
 cleanup() {
@@ -44,7 +58,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Starting e2e stack (mygramdb=${MYGRAMDB_VERSION:-1.10.2})"
+echo "==> Starting e2e stack (${DB_FLAVOR}, mygramdb=${MYGRAMDB_VERSION:-1.10.2})"
 if ! MYGRAM_PORT="${MYGRAM_PORT}" MYGRAM_HTTP_PORT="${MYGRAM_HTTP_PORT}" \
   MYGRAM_ADMIN_TOKEN="${MYGRAM_ADMIN_TOKEN}" "${COMPOSE[@]}" up -d --wait; then
   echo "ERROR: e2e stack did not come up" >&2

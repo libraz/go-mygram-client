@@ -1,0 +1,117 @@
+# MygramDB config for the self-contained docker-compose e2e — MariaDB flavor.
+# Mounted into the mygramdb container at /etc/mygramdb/config.yaml and run with
+# `mygramdb -c` (SKIP_CONFIG_GEN=true bypasses the image's env-based generator).
+# Identical to mygramdb.yaml except for the mysql.host below.
+
+mysql:
+  host: "mariadb"           # docker-compose service name
+  port: 3306
+  user: "repl_user"
+  password: "test_password"
+  database: "testdb"
+  use_gtid: true
+  connect_timeout_ms: 5000
+  datetime_timezone: "+00:00"
+
+tables:
+  - name: "articles"
+    primary_key: "id"
+    text_source:
+      column: "content"
+    required_filters:
+      # The column is TINYINT in the seed schema. From v1.9 the configured type
+      # must match what MySQL reports, so "int" no longer starts.
+      - name: "enabled"
+        type: "tinyint"
+        op: "="
+        value: 1
+        bitmap_index: false
+    filters:
+      - name: "status"
+        type: "int"
+      - name: "category"
+        type: "string"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+  - name: "products"
+    primary_key: "id"
+    text_source:
+      column: "description"
+    required_filters:
+      # The column is TINYINT in the seed schema. From v1.9 the configured type
+      # must match what MySQL reports, so "int" no longer starts.
+      - name: "enabled"
+        type: "tinyint"
+        op: "="
+        value: 1
+        bitmap_index: false
+    filters:
+      - name: "status"
+        type: "int"
+      - name: "category"
+        type: "string"
+    ngram_size: 2
+    kanji_ngram_size: 1
+
+build:
+  batch_size: 5000
+  parallelism: 2
+
+replication:
+  enable: true
+  server_id: 99002
+  start_from: "snapshot"
+  # Build the index at startup. Without it the server comes up empty and stays
+  # not_ready until a client sends SYNC, which the compose healthcheck waits on.
+  auto_initial_snapshot: true
+
+memory:
+  hard_limit_mb: 256
+  soft_target_mb: 200
+  # Enable text verification so HIGHLIGHT and `_score` (BM25) sorting work.
+  verify_text: "all"
+  normalize:
+    nfkc: true
+    width: "narrow"
+    lower: false
+
+dump:
+  # Use the image's existing, writable working directory (the env-based config
+  # generator is bypassed here, so no dumps subdir is pre-created).
+  dir: "/var/lib/mygramdb"
+  interval_sec: 0
+
+api:
+  tcp:
+    bind: "0.0.0.0"
+    port: 11016
+  http:
+    enable: true
+    bind: "0.0.0.0"
+    port: 8080
+  # Required from v1.10 because the listeners bind to every container
+  # interface. Overridden by MYGRAM_API_ADMIN_TOKEN, which the compose file
+  # passes through; the tests read the same value from MYGRAM_ADMIN_TOKEN.
+  admin_token: "e2e_admin_token"
+
+network:
+  # A published port presents the docker bridge gateway address rather than
+  # the host's, so the bridge range has to be allowed. A universal allow list
+  # is rejected outright from v1.10 when the API does not bind to loopback.
+  allow_cidrs:
+    - "127.0.0.1/32"
+    - "::1/128"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
+logging:
+  level: "info"
+  format: "json"
+  file: ""
+
+cache:
+  enabled: true
+
+bm25:
+  enable: true
