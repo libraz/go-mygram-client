@@ -1,6 +1,7 @@
 package mygram
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -915,5 +916,76 @@ func TestParseDebugInfo(t *testing.T) {
 	}
 	if debug.Cache != "miss" {
 		t.Errorf("Cache = %q, want %q", debug.Cache, "miss")
+	}
+}
+
+func TestParseSearchResponseRejectsMalformedHeaderPrimaryKey(t *testing.T) {
+	for _, input := range []string{
+		`OK RESULTS 2 a "unterminated`,
+		`OK RESULTS 1 "bad\x4"`,
+	} {
+		if _, err := parseSearchResponse(input); err == nil {
+			t.Errorf("parseSearchResponse(%q): expected error", input)
+		}
+	}
+
+	resp, err := parseSearchResponse(`OK RESULTS 2 a   "b c"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Results) != 2 || resp.Results[0].PrimaryKey != "a" || resp.Results[1].PrimaryKey != "b c" {
+		t.Errorf("Results = %+v", resp.Results)
+	}
+}
+
+func TestParseGetResponseRejectsMalformedQuotedValue(t *testing.T) {
+	for _, input := range []string{
+		`OK DOC 1 title="unterminated`,
+		`OK DOC 1 a=1 title="bad\x4"`,
+	} {
+		_, err := parseGetResponse(input)
+		if _, ok := err.(*ProtocolError); !ok {
+			t.Errorf("parseGetResponse(%q) error = %T (%v), want *ProtocolError", input, err, err)
+		}
+	}
+}
+
+func TestParseGetResponseFieldEdgeCases(t *testing.T) {
+	doc, err := parseGetResponse(`OK DOC 1 empty="" bare= stray status=1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"empty": "", "bare": "", "status": "1"}
+	if !reflect.DeepEqual(doc.Fields, want) {
+		t.Errorf("Fields = %v, want %v", doc.Fields, want)
+	}
+}
+
+func TestParseReplicationStatusTaggedGTID(t *testing.T) {
+	const gtid = "3E11FA47-71CA-11E1-9E33-C80AA9429562:tag_1:1-5"
+	multi, err := parseReplicationStatusResponse("OK REPLICATION\nstatus: running\ncurrent_gtid: " + gtid + "\nEND")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.GTID != gtid {
+		t.Errorf("GTID = %q, want %q", multi.GTID, gtid)
+	}
+	single, err := parseReplicationStatusResponse("OK REPLICATION status=running gtid=" + gtid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if single.GTID != gtid {
+		t.Errorf("GTID = %q, want %q", single.GTID, gtid)
+	}
+}
+
+func TestParseInfoResponseWithoutReplicationSection(t *testing.T) {
+	// Before AUTH on a server with admin_token set, INFO omits "# Replication".
+	info, err := parseInfoResponse("OK INFO\n\n# Server\nversion: 1.12.0\nreadiness: ready\n\n# Cache\ncache_enabled: 1\n\nEND")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Version != "1.12.0" || info.Readiness != "ready" {
+		t.Errorf("info = %+v", info)
 	}
 }

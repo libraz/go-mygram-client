@@ -278,16 +278,18 @@ func TestSearchAndTermWithSpaceQuoted(t *testing.T) {
 }
 
 // TestSearchUnicodeWhitespaceTermQuoted guards the wire-quoting whitespace
-// set against unicode.IsSpace, which does not agree with the server's rule
-// (spec/tcp-commands.md §2): notably it does not treat U+200B (zero width
-// space) as whitespace, while the server's tokenizer does.
+// set: the Unicode White_Space code points the server's tokenizer splits on
+// (spec/tcp-commands.md §2). U+200B (zero width space) is not one of them and
+// travels bare.
 func TestSearchUnicodeWhitespaceTermQuoted(t *testing.T) {
 	cases := []struct {
 		name string
 		term string
 	}{
 		{"NBSP", "hello\u00a0world"},
-		{"zero width space", "hello\u200bworld"},
+		{"next line", "hello\u0085world"},
+		{"en quad", "hello\u2000world"},
+		{"hair space", "hello\u200aworld"},
 		{"ideographic space", "hello\u3000world"},
 		{"line separator", "hello\u2028world"},
 	}
@@ -1036,7 +1038,7 @@ func TestFacetCommandAllValues(t *testing.T) {
 }
 
 func TestFacetCommandOffset(t *testing.T) {
-	c, srv := connectRecording(t, "OK FACET 0 42\r\n\r\n")
+	c, srv := connectRecording(t, "OK FACET 0 42\r\n\r\n\r\n")
 
 	if _, err := c.Facet("articles", "category", FacetOptions{Limit: 10, Offset: 20}); err != nil {
 		t.Fatal(err)

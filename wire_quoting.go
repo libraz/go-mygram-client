@@ -22,18 +22,30 @@ var wireReservedKeywords = map[string]bool{
 	"ORDER":     true,
 }
 
+// isWireReservedKeyword reports whether value equals a reserved keyword under
+// ASCII case folding, the comparison the server's keyword scanners use. A
+// Unicode-aware fold would also match code points such as U+017F (long s),
+// which the server reads as ordinary text.
+func isWireReservedKeyword(value string) bool {
+	for keyword := range wireReservedKeywords {
+		if equalsASCIIFold(value, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
 // isUnicodeWhitespace reports whether r is one of the non-ASCII code points
-// the server's tokenizer splits on outside quotes: U+00A0, U+1680,
-// U+2000-U+200B, U+2028, U+2029, U+202F, U+205F, U+3000
-// (spec/tcp-commands.md §2). Deliberately not unicode.IsSpace, which
-// disagrees with this set — notably it does not treat U+200B (zero width
-// space) as whitespace, while the server's tokenizer does.
+// the server's tokenizer splits on outside quotes, the Unicode White_Space
+// property: U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F,
+// U+205F, U+3000 (spec/tcp-commands.md §2). U+200B (zero width space) is not
+// White_Space and does not split.
 func isUnicodeWhitespace(r rune) bool {
 	switch r {
-	case 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
+	case 0x0085, 0x00A0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000:
 		return true
 	}
-	return r >= 0x2000 && r <= 0x200B
+	return r >= 0x2000 && r <= 0x200A
 }
 
 // isWireWhitespace reports whether r is a token separator by the server's
@@ -70,7 +82,7 @@ func needsWireQuoting(value string) bool {
 	if value == "" {
 		return true
 	}
-	if wireReservedKeywords[strings.ToUpper(value)] {
+	if isWireReservedKeyword(value) {
 		return true
 	}
 	for _, r := range value {

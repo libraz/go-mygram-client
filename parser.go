@@ -57,9 +57,15 @@ func parseSearchResponse(response string) (*SearchResponse, error) {
 	// keys (classic mode); HIGHLIGHT mode leaves nothing here.
 	var classicPKs []string
 	for {
+		for pos < len(firstLine) && isASCIISpaceByte(firstLine[pos]) {
+			pos++
+		}
+		if pos >= len(firstLine) {
+			break
+		}
 		tok, next, tokOK := parseWireToken(firstLine, pos)
 		if !tokOK {
-			break
+			return nil, &ProtocolError{Message: "invalid SEARCH response: malformed primary key"}
 		}
 		pos = next
 		classicPKs = append(classicPKs, tok)
@@ -268,24 +274,32 @@ func parseGetResponse(response string) (*Document, error) {
 	}
 
 	fields := make(map[string]string)
-	for {
+	for pos < len(firstLine) {
 		for pos < len(firstLine) && isASCIISpaceByte(firstLine[pos]) {
 			pos++
 		}
-		if pos >= len(firstLine) {
-			break
+		keyStart := pos
+		for pos < len(firstLine) && firstLine[pos] != '=' && !isASCIISpaceByte(firstLine[pos]) {
+			pos++
 		}
-		eq := strings.IndexByte(firstLine[pos:], '=')
-		if eq <= 0 {
-			break
+		if pos >= len(firstLine) || firstLine[pos] != '=' {
+			continue // a token without '=' carries no field
 		}
-		name := firstLine[pos : pos+eq]
-		value, next, valueOK := parseWireToken(firstLine, pos+eq+1)
-		if !valueOK {
-			break
+		name := firstLine[keyStart:pos]
+		pos++ // skip '='
+
+		// An empty value is always quoted on the wire, so a '=' directly
+		// before whitespace or the end of the line is an empty bare token.
+		value := ""
+		if pos < len(firstLine) && !isASCIISpaceByte(firstLine[pos]) {
+			var valueOK bool
+			if value, pos, valueOK = parseWireToken(firstLine, pos); !valueOK {
+				return nil, &ProtocolError{Message: "invalid GET response: malformed field value"}
+			}
 		}
-		fields[name] = value
-		pos = next
+		if name != "" {
+			fields[name] = value
+		}
 	}
 
 	return &Document{

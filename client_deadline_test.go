@@ -127,3 +127,37 @@ func TestSendCommandCanceledContextFailsFast(t *testing.T) {
 		t.Error("connection should remain usable after a fail-fast cancellation")
 	}
 }
+
+func TestTimeoutForCommand(t *testing.T) {
+	c := NewClientWithConfig(ClientConfig{
+		TimeoutMs:           100,
+		OptimizeTimeoutMs:   200,
+		DumpLoadTimeoutMs:   300,
+		DumpVerifyTimeoutMs: 400,
+	})
+	cases := []struct {
+		command string
+		want    int
+	}{
+		{"OPTIMIZE", 200},
+		{"optimize", 200},
+		{"Optimize articles", 200},
+		{"OPTIMIZE　articles", 200},
+		{"DUMP LOAD /tmp/x", 300},
+		{"dump   load", 300},
+		{"Dump\tVerify f", 400},
+		{"dump verify f", 400},
+		{"DUMP SAVE", 100},
+		{"DUMP INFO f", 100},
+		{"DUMP", 100},
+		{`SEARCH t "optimize"`, 100},
+		{"SEARCH t optimize", 100},
+		{"OPTIMIZED", 100},
+		{"", 100},
+	}
+	for _, tc := range cases {
+		if got := c.timeoutForCommand(tc.command); got != tc.want {
+			t.Errorf("timeoutForCommand(%q) = %d, want %d", tc.command, got, tc.want)
+		}
+	}
+}

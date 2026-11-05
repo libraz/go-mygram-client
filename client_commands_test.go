@@ -19,7 +19,7 @@ func TestClientInfo(t *testing.T) {
 		buf := make([]byte, 4096)
 		_, _ = conn.Read(buf)
 
-		response := "OK INFO\n\n# Server\nversion: 2.0.0\nuptime_seconds: 100\n\n# Index\ntotal_documents: 5000\n\n# Tables\ntables: threads,images\n\n"
+		response := "OK INFO\r\n\r\n# Server\r\nversion: 2.0.0\r\nuptime_seconds: 100\r\n\r\n# Index\r\ntotal_documents: 5000\r\n\r\n# Tables\r\ntables: threads,images\r\n\r\nEND\r\n"
 		_, _ = conn.Write([]byte(response))
 	})
 	defer cleanup()
@@ -198,7 +198,7 @@ func TestDisableDebug(t *testing.T) {
 }
 
 func TestSetVariableCommand(t *testing.T) {
-	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	c, srv := connectRecording(t, "+OK Variable 'logging.level' set to 'debug value'\r\n\r\n")
 	if err := c.SetVariable("logging.level", "debug value"); err != nil {
 		t.Fatalf("SetVariable: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestSetVariableInvalidName(t *testing.T) {
 }
 
 func TestShowVariablesNoPattern(t *testing.T) {
-	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	c, srv := connectRecording(t, "+----+----+\r\n| Variable_name | Value |\r\n+----+----+\r\n\r\n")
 	if _, err := c.ShowVariables(""); err != nil {
 		t.Fatalf("ShowVariables: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestShowVariablesNoPattern(t *testing.T) {
 }
 
 func TestShowVariablesWithPattern(t *testing.T) {
-	c, srv := connectRecording(t, "+OK\r\n\r\n")
+	c, srv := connectRecording(t, "+OK 0 rows\r\n\r\n")
 	if _, err := c.ShowVariables("logging%"); err != nil {
 		t.Fatalf("ShowVariables: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestDumpSaveAndWaitPollsUntilCompleted(t *testing.T) {
 	srv, addr := newScriptedServer(t, "",
 		"OK DUMP_STARTED /tmp/started.dmp\r\n",
 		"OK DUMP_STATUS\r\nsave_in_progress: true\r\nstatus: RUNNING\r\nEND\r\n",
-		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nresult_filepath: /tmp/final.dmp\r\nEND\r\n",
+		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/started.dmp\r\nresult_filepath: /tmp/final.dmp\r\nEND\r\n",
 	)
 	c := connectScripted(t, DefaultConfig(), addr)
 
@@ -388,7 +388,7 @@ func TestDumpSaveAndWaitPollsUntilCompleted(t *testing.T) {
 func TestDumpSaveAndWaitFallsBackToStartedPath(t *testing.T) {
 	_, addr := newScriptedServer(t, "",
 		"OK DUMP_STARTED /tmp/started.dmp\r\n",
-		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nEND\r\n",
+		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/started.dmp\r\nEND\r\n",
 	)
 	c := connectScripted(t, DefaultConfig(), addr)
 
@@ -404,7 +404,7 @@ func TestDumpSaveAndWaitFallsBackToStartedPath(t *testing.T) {
 func TestDumpSaveAndWaitSurfacesFailure(t *testing.T) {
 	_, addr := newScriptedServer(t, "",
 		"OK DUMP_STARTED /tmp/started.dmp\r\n",
-		"OK DUMP_STATUS\r\nstatus: FAILED\r\nerror: disk full\r\nEND\r\n",
+		"OK DUMP_STATUS\r\nstatus: FAILED\r\nfilepath: /tmp/started.dmp\r\nerror: disk full\r\nEND\r\n",
 	)
 	c := connectScripted(t, DefaultConfig(), addr)
 
@@ -415,6 +415,29 @@ func TestDumpSaveAndWaitSurfacesFailure(t *testing.T) {
 	}
 	if se.Message != "disk full" {
 		t.Errorf("message = %q, want %q", se.Message, "disk full")
+	}
+}
+
+// TestDumpSaveAndWaitIgnoresOtherSavesRecord covers DUMP STATUS being
+// server-wide: a terminal record for a different file is not this save's
+// outcome, so the wait continues until its own record appears.
+func TestDumpSaveAndWaitIgnoresOtherSavesRecord(t *testing.T) {
+	srv, addr := newScriptedServer(t, "",
+		"OK DUMP_STARTED /tmp/started.dmp\r\n",
+		"OK DUMP_STATUS\r\nstatus: FAILED\r\nfilepath: /tmp/other.dmp\r\nerror: disk full\r\nEND\r\n",
+		"OK DUMP_STATUS\r\nstatus: COMPLETED\r\nfilepath: /tmp/started.dmp\r\nEND\r\n",
+	)
+	c := connectScripted(t, DefaultConfig(), addr)
+
+	path, err := c.DumpSaveAndWaitContext(testContext(t), "/tmp/started.dmp")
+	if err != nil {
+		t.Fatalf("DumpSaveAndWait: %v", err)
+	}
+	if path != "/tmp/started.dmp" {
+		t.Errorf("path = %q, want the started path", path)
+	}
+	if got := len(srv.recorded()); got != 3 {
+		t.Errorf("commands = %d, want 3 (save and two status polls)", got)
 	}
 }
 
@@ -564,7 +587,7 @@ func TestDumpInfo(t *testing.T) {
 	response := "OK DUMP_INFO /tmp/dump.bin\r\n" +
 		"version: 2\r\n" +
 		"tables: 3\r\n" +
-		"\r\n"
+		"END\r\n"
 	srv, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
 
@@ -596,7 +619,7 @@ func TestCacheStats(t *testing.T) {
 		"current_entries: 42\r\n" +
 		"current_memory_bytes: 1048576\r\n" +
 		"evictions: 5\r\n" +
-		"\r\n"
+		"END\r\n"
 	srv, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
 
@@ -638,7 +661,7 @@ func TestCacheStats(t *testing.T) {
 }
 
 func TestCacheStatsDisabled(t *testing.T) {
-	response := "OK CACHE_STATS\r\n\r\nenabled: false\r\n\r\n"
+	response := "OK CACHE_STATS\r\n\r\nenabled: false\r\nEND\r\n"
 	_, addr, cleanup := newRecordingServer(t, response)
 	defer cleanup()
 
