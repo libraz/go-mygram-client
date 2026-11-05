@@ -17,10 +17,6 @@ func isASCIISpace(b byte) bool {
 	return false
 }
 
-func isASCIIAlnum(b byte) bool {
-	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
-}
-
 func toASCIIUpperByte(b byte) byte {
 	if b >= 'a' && b <= 'z' {
 		return b - ('a' - 'A')
@@ -34,6 +30,7 @@ type exprTokenType int
 
 const (
 	exprTokTerm exprTokenType = iota
+	exprTokQuotedTerm
 	exprTokPlus
 	exprTokMinus
 	exprTokOr
@@ -115,6 +112,28 @@ func (t *exprTokenizer) readQuotedString() string {
 	return sb.String()
 }
 
+// isOperatorBoundaryAfter reports whether an operator word may end at pos:
+// end of input, ASCII or U+3000 whitespace, a parenthesis or a double quote.
+// Anything else continues the word.
+func (t *exprTokenizer) isOperatorBoundaryAfter(pos int) bool {
+	if pos >= len(t.input) {
+		return true
+	}
+	ch := t.input[pos]
+	return isASCIISpace(ch) || ch == '(' || ch == ')' || ch == '"' || isFullWidthSpaceAt(t.input, pos)
+}
+
+// isOperatorBoundaryBefore reports whether an operator word may start at pos
+// (same delimiters as isOperatorBoundaryAfter).
+func (t *exprTokenizer) isOperatorBoundaryBefore(pos int) bool {
+	if pos == 0 {
+		return true
+	}
+	prev := t.input[pos-1]
+	return isASCIISpace(prev) || prev == '(' || prev == ')' || prev == '"' ||
+		(pos >= 3 && isFullWidthSpaceAt(t.input, pos-3))
+}
+
 // next returns the next token, mirroring the server client's Tokenizer::Next.
 func (t *exprTokenizer) next() exprToken {
 	t.skipWhitespace()
@@ -125,7 +144,7 @@ func (t *exprTokenizer) next() exprToken {
 	ch := t.input[t.pos]
 	switch ch {
 	case '"':
-		return exprToken{typ: exprTokTerm, value: t.readQuotedString()}
+		return exprToken{typ: exprTokQuotedTerm, value: t.readQuotedString()}
 	case '+':
 		t.pos++
 		return exprToken{typ: exprTokPlus}
@@ -144,18 +163,11 @@ func (t *exprTokenizer) next() exprToken {
 	// server does the same on both the top-level clause scanner and the
 	// boolean AST tokenizer, so "or"/"Or" must be caught here too, or the
 	// client sends it as data while the server re-reads it as the operator.
-	if t.pos+2 <= len(t.input) && toASCIIUpperByte(t.input[t.pos]) == 'O' && toASCIIUpperByte(t.input[t.pos+1]) == 'R' {
-		isWholeWord := true
-		if t.pos > 0 && isASCIIAlnum(t.input[t.pos-1]) {
-			isWholeWord = false
-		}
-		if t.pos+2 < len(t.input) && isASCIIAlnum(t.input[t.pos+2]) {
-			isWholeWord = false
-		}
-		if isWholeWord {
-			t.pos += 2
-			return exprToken{typ: exprTokOr, value: "OR"}
-		}
+	// A word that merely starts with "or" ("OR-tools", "OR回路") is a term.
+	if t.pos+2 <= len(t.input) && equalsASCIIFold(t.input[t.pos:t.pos+2], "OR") &&
+		t.isOperatorBoundaryBefore(t.pos) && t.isOperatorBoundaryAfter(t.pos+2) {
+		t.pos += 2
+		return exprToken{typ: exprTokOr, value: "OR"}
 	}
 
 	return exprToken{typ: exprTokTerm, value: t.readTerm()}
@@ -180,26 +192,39 @@ func (p *exprParser) advance() {
 }
 
 // parse parses the whole expression, mirroring the server client's
-// Parser::Parse.
+// Parser::Parse. An expression with a top-level OR becomes one group: implicit
+// AND binds tighter than OR, so "a OR b c" is "a OR (b c)", exactly what the
+// parenthesized form "(a OR b c)" means to the server grammar.
 func (p *exprParser) parse() (*SearchExpression, error) {
 	expr := &SearchExpression{}
+
+	if p.hasTopLevelOr() {
+		group, err := p.captureTopLevelOrGroup()
+		if err != nil {
+			return nil, err
+		}
+		expr.RawExpression = group
+		return expr, nil
+	}
 
 	for p.current.typ != exprTokEnd {
 		switch p.current.typ {
 		case exprTokPlus:
 			p.advance()
-			term, ok := p.parsePrefixedTerm()
+			operand, ok := p.parsePrefixedTerm()
 			if !ok {
 				return nil, &ValidationError{Message: "expected term after '+'"}
 			}
-			expr.RequiredTerms = append(expr.RequiredTerms, term)
+			expr.RequiredTerms = append(expr.RequiredTerms, operand.text)
+			expr.RequiredIsGroup = append(expr.RequiredIsGroup, operand.isGroup)
 		case exprTokMinus:
 			p.advance()
-			term, ok := p.parsePrefixedTerm()
+			operand, ok := p.parsePrefixedTerm()
 			if !ok {
 				return nil, &ValidationError{Message: "expected term after '-'"}
 			}
-			expr.ExcludedTerms = append(expr.ExcludedTerms, term)
+			expr.ExcludedTerms = append(expr.ExcludedTerms, operand.text)
+			expr.ExcludedIsGroup = append(expr.ExcludedIsGroup, operand.isGroup)
 		case exprTokLParen:
 			paren := p.captureParenExpression()
 			if paren == "" {
@@ -209,24 +234,13 @@ func (p *exprParser) parse() (*SearchExpression, error) {
 				expr.RawExpression += " "
 			}
 			expr.RawExpression += paren
-		case exprTokTerm:
-			if p.looksLikeOrExpression() {
-				orExpr, err := p.captureOrExpression()
-				if err != nil {
-					return nil, err
-				}
-				if expr.RawExpression != "" {
-					expr.RawExpression += " "
-				}
-				expr.RawExpression += orExpr
-			} else {
-				// Regular term (implicit AND). Stored as plain text
-				// regardless of whether it was quoted -- ToQueryString
-				// re-applies wire quoting exactly once, at the destination
-				// the term is serialized onto.
-				expr.RequiredTerms = append(expr.RequiredTerms, p.current.value)
-				p.advance()
-			}
+		case exprTokTerm, exprTokQuotedTerm:
+			// Implicit AND. Stored as plain text regardless of whether it was
+			// quoted -- ToQueryString re-applies wire quoting exactly once, at
+			// the destination the term is serialized onto.
+			expr.RequiredTerms = append(expr.RequiredTerms, p.current.value)
+			expr.RequiredIsGroup = append(expr.RequiredIsGroup, false)
+			p.advance()
 		case exprTokOr:
 			return nil, &ValidationError{Message: "unexpected 'OR' operator"}
 		case exprTokRParen:
@@ -239,63 +253,126 @@ func (p *exprParser) parse() (*SearchExpression, error) {
 	return expr, nil
 }
 
-func (p *exprParser) parsePrefixedTerm() (string, bool) {
-	if p.current.typ == exprTokLParen {
-		expr := p.captureParenExpression()
-		if expr == "" {
-			return "", false
-		}
-		return expr, true
-	}
-	if p.current.typ == exprTokTerm {
-		term := p.current.value
-		p.advance()
-		return term, true
-	}
-	return "", false
+// prefixedOperand is the operand of a unary +/-: plain term text, or a
+// formatted group.
+type prefixedOperand struct {
+	text    string
+	isGroup bool
 }
 
-// looksLikeOrExpression looks ahead one token to decide whether the current
-// term begins an OR chain, then rewinds.
-func (p *exprParser) looksLikeOrExpression() bool {
+func (p *exprParser) parsePrefixedTerm() (prefixedOperand, bool) {
+	switch p.current.typ {
+	case exprTokLParen:
+		expr := p.captureParenExpression()
+		if expr == "" {
+			return prefixedOperand{}, false
+		}
+		return prefixedOperand{text: expr, isGroup: true}, true
+	case exprTokTerm, exprTokQuotedTerm:
+		operand := prefixedOperand{text: p.current.value}
+		p.advance()
+		return operand, true
+	}
+	return prefixedOperand{}, false
+}
+
+// hasTopLevelOr reports whether an OR operator appears outside every
+// parenthesized group, then rewinds.
+func (p *exprParser) hasTopLevelOr() bool {
 	savedPos := p.tok.pos
 	savedCurrent := p.current
 
-	p.advance()
-	hasOr := p.current.typ == exprTokOr
+	found := false
+	depth := 0
+	for p.current.typ != exprTokEnd && !found {
+		switch p.current.typ {
+		case exprTokLParen:
+			depth++
+		case exprTokRParen:
+			depth--
+		case exprTokOr:
+			found = depth <= 0
+		}
+		p.advance()
+	}
 
 	p.tok.pos = savedPos
 	p.current = savedCurrent
-	return hasOr
+	return found
 }
 
-// captureOrExpression reconstructs an OR chain as AST-syntax text, applying
-// the shared wire-quoting decision to every term so a plain word that
-// collides with a reserved keyword (e.g. "order") is quoted here too,
-// instead of reaching the server's AST tokenizer as a bare operator.
-func (p *exprParser) captureOrExpression() (string, error) {
-	var sb strings.Builder
-	sb.WriteString(quoteWireToken(p.current.value))
-	p.advance()
+// isOperandEnd reports whether a token ends a term, quoted term or group, so
+// that a following operand needs a separating space.
+func isOperandEnd(typ exprTokenType) bool {
+	return typ == exprTokTerm || typ == exprTokQuotedTerm || typ == exprTokRParen
+}
 
-	for p.current.typ == exprTokOr {
-		sb.WriteString(" OR ")
-		p.advance()
+// captureTopLevelOrGroup captures the whole expression as one group of
+// AST-syntax text, applying the shared wire-quoting decision to every term so
+// a plain word that collides with a reserved keyword (e.g. "order") is quoted
+// instead of reaching the server's AST tokenizer as a bare operator. A '-'
+// becomes NOT on the operand it prefixes; a '+' is dropped, since adjacency
+// is already AND.
+func (p *exprParser) captureTopLevelOrGroup() (string, error) {
+	var sb strings.Builder
+	previous := exprTokEnd
+	pendingNot := false
+
+	for p.current.typ != exprTokEnd {
 		switch p.current.typ {
-		case exprTokTerm:
-			sb.WriteString(quoteWireToken(p.current.value))
-			p.advance()
-		case exprTokLParen:
-			paren := p.captureParenExpression()
-			if paren == "" {
-				return "", &ValidationError{Message: "unbalanced parentheses after 'OR'"}
+		case exprTokOr:
+			if previous == exprTokEnd || previous == exprTokOr {
+				return "", &ValidationError{Message: "unexpected 'OR' operator"}
 			}
-			sb.WriteString(paren)
+			pendingNot = false
+			sb.WriteString(" OR ")
+			previous = exprTokOr
+			p.advance()
+		case exprTokPlus, exprTokMinus:
+			if previous == exprTokEnd || previous == exprTokOr {
+				return "", &ValidationError{Message: "expected term next to 'OR'"}
+			}
+			pendingNot = p.current.typ == exprTokMinus
+			p.advance()
+		case exprTokRParen:
+			return "", &ValidationError{Message: "unexpected ')'"}
 		default:
-			return "", &ValidationError{Message: "expected term after 'OR'"}
+			// A term, quoted term or parenthesized group.
+			isGroup := p.current.typ == exprTokLParen
+			operandType := p.current.typ
+			var operand string
+			if isGroup {
+				operand = p.captureParenExpression()
+				if operand == "" {
+					message := "unbalanced parentheses"
+					if previous == exprTokOr {
+						message = "unbalanced parentheses after 'OR'"
+					}
+					return "", &ValidationError{Message: message}
+				}
+			} else {
+				operand = quoteWireToken(p.current.value)
+				p.advance()
+			}
+			if isOperandEnd(previous) {
+				sb.WriteByte(' ')
+			}
+			if pendingNot {
+				sb.WriteString("NOT ")
+				pendingNot = false
+			}
+			sb.WriteString(operand)
+			if isGroup {
+				previous = exprTokRParen
+			} else {
+				previous = operandType
+			}
 		}
 	}
 
+	if previous == exprTokOr {
+		return "", &ValidationError{Message: "expected term after 'OR'"}
+	}
 	return sb.String(), nil
 }
 
@@ -315,23 +392,31 @@ func (p *exprParser) captureParenExpression() string {
 	// space it needs before the "NOT" it is about to emit.
 	previousType := exprTokEnd
 	// A bare '-' has no keyword the AST parser recognizes; the server only
-	// understands the literal word NOT. Defer emission until the term it
-	// prefixes arrives, exactly as ExcludedTerms outside a group are
-	// rendered as "NOT term" in ToQueryString.
+	// understands the literal word NOT. Defer emission to the very next
+	// token: a term or a nested group takes the NOT, anything else drops it,
+	// so it never leaks onto a later term.
 	pendingNot := false
 
 	for {
 		switch p.current.typ {
 		case exprTokLParen:
+			if isOperandEnd(previousType) {
+				sb.WriteByte(' ')
+			}
+			if pendingNot {
+				sb.WriteString("NOT ")
+				pendingNot = false
+			}
 			depth++
 			sb.WriteByte('(')
 			previousType = exprTokLParen
 		case exprTokRParen:
+			pendingNot = false
 			depth--
 			sb.WriteByte(')')
 			previousType = exprTokRParen
-		case exprTokTerm:
-			if previousType == exprTokTerm || previousType == exprTokRParen {
+		case exprTokTerm, exprTokQuotedTerm:
+			if isOperandEnd(previousType) {
 				sb.WriteByte(' ')
 			}
 			if pendingNot {
@@ -339,8 +424,9 @@ func (p *exprParser) captureParenExpression() string {
 				pendingNot = false
 			}
 			sb.WriteString(quoteWireToken(p.current.value))
-			previousType = exprTokTerm
+			previousType = p.current.typ
 		case exprTokOr:
+			pendingNot = false
 			sb.WriteString(" OR ")
 			previousType = exprTokOr
 		case exprTokPlus:
@@ -348,6 +434,7 @@ func (p *exprParser) captureParenExpression() string {
 			// AND'ed by adjacency already, so '+' is dropped rather than
 			// glued onto the next term as a raw character the AST
 			// tokenizer rejects.
+			pendingNot = false
 		case exprTokMinus:
 			pendingNot = true
 		case exprTokEnd:
@@ -364,36 +451,37 @@ func (p *exprParser) captureParenExpression() string {
 	return sb.String()
 }
 
-// isParenthesizedSubexpression reports whether term is a parenthesized
-// sub-expression captured by captureParenExpression (already fully
-// quoted/escaped), as opposed to plain term text still needing
-// quoteWireToken's decision. Detected structurally, never by scanning for an
-// "OR" substring inside a token, which would misclassify ordinary words such
-// as ORDER and ORANGE.
-func isParenthesizedSubexpression(term string) bool {
-	return len(term) >= 2 && term[0] == '(' && term[len(term)-1] == ')'
-}
-
 // SearchExpression represents a parsed search expression.
 type SearchExpression struct {
 	// RequiredTerms contains every term that must match: those with a '+'
 	// prefix and every unprefixed term (implicit AND), in the order they
-	// appeared. An entry may itself be a parenthesized sub-expression (see
-	// isParenthesizedSubexpression) captured from "+(...)".
+	// appeared. An entry flagged in RequiredIsGroup is a formatted
+	// parenthesized sub-expression captured from "+(...)", already quoted.
 	RequiredTerms []string
 
-	// ExcludedTerms contains keywords marked for exclusion with '-'.
+	// ExcludedTerms contains keywords marked for exclusion with '-'. An entry
+	// flagged in ExcludedIsGroup is a formatted "-(...)" group.
 	ExcludedTerms []string
 
-	// OptionalTerms is unused; kept for source compatibility. Every
-	// unprefixed term is required (implicit AND) and lives in RequiredTerms.
-	OptionalTerms []string
-
-	// RawExpression holds AST-syntax text reconstructed from any bare OR
-	// chain or parenthesized group not immediately preceded by '+'/'-',
-	// with the shared wire-quoting decision already applied to each of its
-	// terms.
+	// RawExpression holds AST-syntax text reconstructed from any expression
+	// with a top-level OR, or any parenthesized group not immediately
+	// preceded by '+'/'-', with the shared wire-quoting decision already
+	// applied to each of its terms.
 	RawExpression string
+
+	// RequiredIsGroup runs parallel to RequiredTerms: true where the entry is
+	// a formatted (...) group rather than plain term text. A quoted phrase
+	// shaped like a group stays plain text.
+	RequiredIsGroup []bool
+
+	// ExcludedIsGroup runs parallel to ExcludedTerms with the same meaning.
+	ExcludedIsGroup []bool
+}
+
+// isGroupEntry reports whether entry index of a term list is a formatted
+// group; a missing flag means plain text.
+func isGroupEntry(isGroup []bool, index int) bool {
+	return index < len(isGroup) && isGroup[index]
 }
 
 // ParseSearchExpression parses a web-search-style search expression.
@@ -404,6 +492,10 @@ type SearchExpression struct {
 //   - "phrase": phrase search
 //   - OR (case-insensitive, as a whole word): logical OR
 //   - (expr): grouping
+//
+// Implicit AND binds tighter than OR, so an expression with a top-level OR is
+// one group: "a OR b c" is "(a OR b c)". A '-' before a group excludes the
+// whole group, and a quoted phrase is always a phrase, never a group.
 func ParseSearchExpression(expression string) (*SearchExpression, error) {
 	if expression == "" {
 		return nil, &ValidationError{Message: "empty search expression"}
@@ -413,19 +505,18 @@ func ParseSearchExpression(expression string) (*SearchExpression, error) {
 
 // HasComplexExpression returns whether the expression contains OR or
 // grouping: a non-empty RawExpression, or a RequiredTerms/ExcludedTerms
-// entry that is itself a parenthesized sub-expression (from "+(...)"
-// or "-(...)").
+// entry flagged as a group (from "+(...)" or "-(...)").
 func HasComplexExpression(expr *SearchExpression) bool {
 	if expr.RawExpression != "" {
 		return true
 	}
-	for _, t := range expr.RequiredTerms {
-		if isParenthesizedSubexpression(t) {
+	for _, isGroup := range expr.RequiredIsGroup {
+		if isGroup {
 			return true
 		}
 	}
-	for _, t := range expr.ExcludedTerms {
-		if isParenthesizedSubexpression(t) {
+	for _, isGroup := range expr.ExcludedIsGroup {
+		if isGroup {
 			return true
 		}
 	}
@@ -437,8 +528,8 @@ func HasComplexExpression(expr *SearchExpression) bool {
 // term so a literal term colliding with a reserved keyword, or containing
 // whitespace, reaches the server as the search text it was written as.
 func ToQueryString(expr *SearchExpression) string {
-	emit := func(term string) string {
-		if isParenthesizedSubexpression(term) {
+	emit := func(term string, isGroup bool) string {
+		if isGroup {
 			return term
 		}
 		return quoteWireToken(term)
@@ -449,14 +540,14 @@ func ToQueryString(expr *SearchExpression) string {
 		if i > 0 {
 			sb.WriteString(" AND ")
 		}
-		sb.WriteString(emit(term))
+		sb.WriteString(emit(term, isGroupEntry(expr.RequiredIsGroup, i)))
 	}
-	for _, term := range expr.ExcludedTerms {
+	for i, term := range expr.ExcludedTerms {
 		if sb.Len() > 0 {
 			sb.WriteString(" AND ")
 		}
 		sb.WriteString("NOT ")
-		sb.WriteString(emit(term))
+		sb.WriteString(emit(term, isGroupEntry(expr.ExcludedIsGroup, i)))
 	}
 	if expr.RawExpression != "" {
 		if sb.Len() > 0 {

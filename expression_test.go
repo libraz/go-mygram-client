@@ -1,6 +1,7 @@
 package mygram
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -92,9 +93,6 @@ func TestParseSearchExpression(t *testing.T) {
 
 			assertStringSlice(t, "RequiredTerms", expr.RequiredTerms, tt.wantRequired)
 			assertStringSlice(t, "ExcludedTerms", expr.ExcludedTerms, tt.wantExcluded)
-			// OptionalTerms is unused: every unprefixed term is required.
-			assertStringSlice(t, "OptionalTerms", expr.OptionalTerms, nil)
-
 			if HasComplexExpression(expr) != tt.wantComplex {
 				t.Errorf("HasComplexExpression = %v, want %v", HasComplexExpression(expr), tt.wantComplex)
 			}
@@ -561,4 +559,171 @@ func containsAll(s string, substrs ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestBareOrExpressionMatchesItsParenthesizedForm(t *testing.T) {
+	golden := []struct{ expression, want string }{
+		{"a OR b c", "(a OR b c)"},
+		{"(a OR b c)", "((a OR b c))"},
+		{"a OR b c OR d", "(a OR b c OR d)"},
+		{"x a OR b", "(x a OR b)"},
+		{"a OR (b c) d", "(a OR (b c) d)"},
+		{"a -b OR c", "(a NOT b OR c)"},
+		{"a +b OR c", "(a b OR c)"},
+	}
+	for _, tc := range golden {
+		got, err := ConvertSearchExpression(tc.expression)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.expression, err)
+		}
+		if got != tc.want {
+			t.Errorf("ConvertSearchExpression(%q) = %q, want %q", tc.expression, got, tc.want)
+		}
+	}
+
+	// The wrapped form carries the same single group the bare form does.
+	for _, expression := range []string{"a OR b c", "a OR b c OR d", "x a OR b"} {
+		bare, err := ParseSearchExpression(expression)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrapped, err := ParseSearchExpression("(" + expression + ")")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bare.RequiredTerms) != 0 {
+			t.Errorf("%q: RequiredTerms = %v, want none", expression, bare.RequiredTerms)
+		}
+		if wrapped.RawExpression != "("+bare.RawExpression+")" {
+			t.Errorf("%q: wrapped RawExpression = %q, want %q", expression, wrapped.RawExpression, "("+bare.RawExpression+")")
+		}
+	}
+}
+
+func TestTopLevelOrRejectsDanglingOperators(t *testing.T) {
+	for _, expression := range []string{"a OR", "a OR OR b", "a OR -b", "a OR )", "OR a"} {
+		if _, err := ParseSearchExpression(expression); err == nil {
+			t.Errorf("ParseSearchExpression(%q): expected error", expression)
+		}
+	}
+}
+
+func TestQuotedPhraseShapedLikeAGroupStaysLiteral(t *testing.T) {
+	got, err := ConvertSearchExpression(`"(a OR b)"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `"(a OR b)"` {
+		t.Errorf("ConvertSearchExpression = %q, want the phrase quoted", got)
+	}
+
+	parsed, err := ParseSearchExpression(`"(beta)"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if HasComplexExpression(parsed) {
+		t.Error("a quoted phrase shaped like a group must not be complex")
+	}
+
+	simplified, err := SimplifySearchExpression(`"(beta)"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if simplified.MainTerm != "(beta)" {
+		t.Errorf("MainTerm = %q, want (beta)", simplified.MainTerm)
+	}
+
+	simplified, err = SimplifySearchExpression(`foo -"(x)"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStringSlice(t, "NotTerms", simplified.NotTerms, []string{"(x)"})
+}
+
+func TestPrefixedGroupIsTaggedStructurally(t *testing.T) {
+	parsed, err := ParseSearchExpression("+golang +(tutorial OR guide) -(old)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(parsed.RequiredIsGroup, []bool{false, true}) {
+		t.Errorf("RequiredIsGroup = %v", parsed.RequiredIsGroup)
+	}
+	if !reflect.DeepEqual(parsed.ExcludedIsGroup, []bool{true}) {
+		t.Errorf("ExcludedIsGroup = %v", parsed.ExcludedIsGroup)
+	}
+	if got := ToQueryString(parsed); got != "golang AND (tutorial OR guide) AND NOT (old)" {
+		t.Errorf("ToQueryString = %q", got)
+	}
+}
+
+func TestNegatedGroupExcludesTheWholeGroup(t *testing.T) {
+	got, err := ConvertSearchExpression("foo -(a b)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "foo AND NOT (a b)" {
+		t.Errorf("ConvertSearchExpression = %q", got)
+	}
+}
+
+func TestMinusInsideGroupNegatesOnlyTheNextOperand(t *testing.T) {
+	for _, tc := range []struct{ expression, want string }{
+		{"(a -(b c))", "((a NOT (b c)))"},
+		{"(a -) b", "b AND ((a))"},
+		{"(a - OR b)", "((a OR b))"},
+		{"(a -b c)", "((a NOT b c))"},
+	} {
+		got, err := ConvertSearchExpression(tc.expression)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.expression, err)
+		}
+		if got != tc.want {
+			t.Errorf("ConvertSearchExpression(%q) = %q, want %q", tc.expression, got, tc.want)
+		}
+	}
+}
+
+func TestOrIsAnOperatorOnlyAsAWholeToken(t *testing.T) {
+	for _, term := range []string{"OR-tools", "OR.", "or's", "OR回路"} {
+		parsed, err := ParseSearchExpression(term)
+		if err != nil {
+			t.Fatalf("%q: %v", term, err)
+		}
+		if HasComplexExpression(parsed) {
+			t.Errorf("%q: HasComplexExpression = true, want false", term)
+		}
+		assertStringSlice(t, "RequiredTerms", parsed.RequiredTerms, []string{term})
+	}
+
+	for _, tc := range []struct{ expression, want string }{
+		{"python OR-tools", "python AND OR-tools"},
+		{"OR回路 入門", "OR回路 AND 入門"},
+		{"python　OR　ruby", "(python OR ruby)"},
+		{`python OR"ruby"`, `(python OR ruby)`},
+		{`"python"OR ruby`, `(python OR ruby)`},
+	} {
+		got, err := ConvertSearchExpression(tc.expression)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.expression, err)
+		}
+		if got != tc.want {
+			t.Errorf("ConvertSearchExpression(%q) = %q, want %q", tc.expression, got, tc.want)
+		}
+	}
+}
+
+func TestMultibyteTermsAreNotSplitOnTrailingA0Byte(t *testing.T) {
+	parsed, err := ParseSearchExpression("café Ångström")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStringSlice(t, "RequiredTerms", parsed.RequiredTerms, []string{"café", "Ångström"})
+
+	got, err := ConvertSearchExpression("ORà xà")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "ORà AND xà" {
+		t.Errorf("ConvertSearchExpression = %q", got)
+	}
 }
