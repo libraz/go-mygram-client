@@ -27,10 +27,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-  # Every entry is a supported LTS. Innovation releases are superseded by the
-  # next one a quarter later, so they are reached with --only rather than
-  # carried here, where they would go out of support between runs.
-  TARGETS=("mysql:8.4" "mysql:9.7" "mariadb:10.11" "mariadb:11.8" "mariadb:12.3")
+  # Every supported LTS series of both flavors, plus the current MySQL
+  # Innovation release through the floating "innovation" tag, which always
+  # names the current one and so never goes out of support between runs.
+  TARGETS=(
+    "mysql:8.4" "mysql:9.7" "mysql:innovation"
+    "mariadb:10.11" "mariadb:11.4" "mariadb:11.8" "mariadb:12.3"
+  )
 fi
 
 overall_pass=0

@@ -29,7 +29,7 @@ adopt that stack's `mysql` service and `down -v` tear it down.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MYGRAMDB_VERSION` | `1.10.2` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.10`, `latest`) |
+| `MYGRAMDB_VERSION` | `1.12.0` | Server image tag (`ghcr.io/libraz/mygram-db:<tag>`; e.g. `1.10`, `latest`) |
 | `DB_FLAVOR` | `mysql` | `mysql` or `mariadb`; selects the compose file and seed database |
 | `MYSQL_VERSION` | `8.4` | MySQL image tag (used when `DB_FLAVOR=mysql`) |
 | `MARIADB_VERSION` | `11.8` | MariaDB image tag (used when `DB_FLAVOR=mariadb`) |
@@ -56,9 +56,10 @@ bash e2e/docker/run-matrix.sh --only mysql:8.4,mariadb:11.8
 ```
 
 Targets (mirrors the server's own `e2e/run-matrix.sh`): `mysql:8.4`, `mysql:9.7`,
-`mariadb:10.11`, `mariadb:11.8`, `mariadb:12.3`. Every entry is a supported LTS;
-innovation releases are superseded by the next one a quarter later, so they are
-reached with `--only` rather than carried in the default list.
+`mysql:innovation`, `mariadb:10.11`, `mariadb:11.4`, `mariadb:11.8`,
+`mariadb:12.3`. Every entry is a supported LTS series except `mysql:innovation`,
+a floating tag that always names the current Innovation release and so never
+goes out of support between runs.
 
 ## What it exercises
 

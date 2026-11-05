@@ -9,7 +9,7 @@
 #   MYGRAM_E2E_SEEDED=1 go test -tags=e2e -count=1 ./...
 #   docker compose -f e2e/docker/docker-compose.yml down -v
 #
-# Override the server version with MYGRAMDB_VERSION (defaults to the v1.10
+# Override the server version with MYGRAMDB_VERSION (defaults to the v1.12
 # line) and the administrative token with MYGRAM_ADMIN_TOKEN.
 
 # The project name is declared here rather than inferred from the directory
@@ -36,6 +36,8 @@ services:
       - --gtid-mode=ON
       - --enforce-gtid-consistency=ON
       - --binlog-row-image=FULL
+      # Replication reads column metadata from TABLE_MAP events (v1.11 and later).
+      - --binlog-row-metadata=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
@@ -51,7 +53,7 @@ services:
       start_period: 30s
 
   mygramdb:
-    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.2}
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.12.0}
     depends_on:
       mysql:
         condition: service_healthy

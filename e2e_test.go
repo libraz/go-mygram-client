@@ -417,6 +417,44 @@ func TestE2EServerErrorCode(t *testing.T) {
 // debug mode
 // -----------------------------------------------------------------------------
 
+// TestE2EDebugRawCommand turns DEBUG on through SendCommand rather than
+// EnableDebug: the client must follow the acknowledgement so the next search
+// reply is framed with its debug block.
+func TestE2EDebugRawCommand(t *testing.T) {
+	c := newE2EClient(t)
+	table := firstTable(t, c)
+	if _, err := c.SendCommand("debug on"); err != nil {
+		t.Fatalf("DEBUG ON: %v", err)
+	}
+	resp, err := c.Search(table, "test", SearchOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("Search under DEBUG: %v", err)
+	}
+	if resp.Debug == nil {
+		t.Error("Debug = nil, want the DEBUG block of the reply")
+	}
+	if _, err := c.SendCommand("DEBUG OFF"); err != nil {
+		t.Fatalf("DEBUG OFF: %v", err)
+	}
+	resp, err = c.Search(table, "test", SearchOptions{Limit: 1})
+	if err != nil {
+		t.Fatalf("Search after DEBUG OFF: %v", err)
+	}
+	if resp.Debug != nil {
+		t.Errorf("Debug = %+v after DEBUG OFF, want nil", resp.Debug)
+	}
+}
+
+// TestE2ESearchTermNamedHighlight searches for the word itself: it is data,
+// not the HIGHLIGHT clause, and the reply must not be awaited as highlight rows.
+func TestE2ESearchTermNamedHighlight(t *testing.T) {
+	c := newE2EClient(t)
+	table := firstTable(t, c)
+	if _, err := c.Search(table, "highlight", SearchOptions{Limit: 1}); err != nil {
+		t.Fatalf("Search \"highlight\": %v", err)
+	}
+}
+
 func TestE2EDebugMode(t *testing.T) {
 	c := newE2EClient(t)
 	if err := c.EnableDebug(); err != nil {
@@ -1174,6 +1212,46 @@ func TestE2ESeeded(t *testing.T) {
 			got[r.PrimaryKey] = true
 		}
 		assertPKSet(t, got, "2")
+	})
+
+	// Web-syntax expressions are converted client-side and sent as boolean
+	// text, so the server's grammar decides what each conversion means.
+	rawPKs := func(t *testing.T, expression string) map[string]bool {
+		t.Helper()
+		query, err := ConvertSearchExpression(expression)
+		if err != nil {
+			t.Fatalf("ConvertSearchExpression(%q): %v", expression, err)
+		}
+		resp, err := c.SearchRaw(table, query, SearchRawOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("SearchRaw(%q): %v", query, err)
+		}
+		got := make(map[string]bool, len(resp.Results))
+		for _, r := range resp.Results {
+			got[r.PrimaryKey] = true
+		}
+		return got
+	}
+
+	t.Run("expression OR binds looser than implicit AND", func(t *testing.T) {
+		// "ruby OR python basics" is "ruby OR (python basics)": id 2 has ruby,
+		// id 3 has python and basics. Read left to right it would be {3}.
+		assertPKSet(t, rawPKs(t, "ruby OR python basics"), "2", "3")
+	})
+
+	t.Run("expression negated group excludes the whole group", func(t *testing.T) {
+		// id 3 has "machine" but not "rails", so it survives NOT (machine rails).
+		assertPKSet(t, rawPKs(t, "python -(machine rails)"), "3")
+	})
+
+	t.Run("expression term starting with OR is not the operator", func(t *testing.T) {
+		assertPKSet(t, rawPKs(t, "python OR-tools"))
+	})
+
+	t.Run("expression quoted phrase shaped like a group is literal", func(t *testing.T) {
+		if got := rawPKs(t, `"(python)"`); got["3"] {
+			t.Errorf("literal \"(python)\" matched %v; a quoted phrase must not become a group", keysOf(got))
+		}
 	})
 
 	t.Run("japanese ngram match", func(t *testing.T) {

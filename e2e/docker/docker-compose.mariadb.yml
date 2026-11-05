@@ -29,6 +29,8 @@ services:
       - --log-bin=mariadb-bin
       - --binlog-format=ROW
       - --binlog-row-image=FULL
+      # Replication reads column metadata from TABLE_MAP events (v1.11 and later).
+      - --binlog-row-metadata=FULL
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     volumes:
@@ -43,7 +45,7 @@ services:
       start_period: 30s
 
   mygramdb:
-    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.10.2}
+    image: ghcr.io/libraz/mygram-db:${MYGRAMDB_VERSION:-1.12.0}
     depends_on:
       mariadb:
         condition: service_healthy
