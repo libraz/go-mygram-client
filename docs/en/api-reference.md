@@ -177,7 +177,10 @@ func (c *Client) DisableDebug() error
 ```
 
 When debug mode is enabled, search and count responses carry a populated
-`Debug *DebugInfo` field with per-query timing and candidate counts.
+`Debug *DebugInfo` field with per-query timing and candidate counts. The client
+follows the server's `OK DEBUG_ON` / `OK DEBUG_OFF` acknowledgement, so a
+`DEBUG ON` sent through `SendCommand` is tracked the same way, and the flag is
+cleared when the connection is replaced.
 
 ### Runtime Variables
 
@@ -241,7 +244,9 @@ func (c *Client) SendCommand(command string) (string, error)
 ```
 
 Sends an arbitrary protocol command and returns the raw server response — an
-escape hatch for commands the typed API does not cover.
+escape hatch for commands the typed API does not cover. `OPTIMIZE`,
+`DUMP LOAD` and `DUMP VERIFY` get their long-operation timeouts here too,
+whatever their case or spacing.
 
 ## Pool
 
@@ -627,8 +632,9 @@ func ParseTableIdentity(identity string) (database, table string, err error)
 
 `QualifyTableIdentity` builds a `database.table` identity (or returns the bare
 table when `database` is empty); `ParseTableIdentity` splits one back into its
-parts. Both validate the identifiers and reject whitespace and control
-characters.
+parts. Both validate the identifiers and reject whitespace (ASCII and
+Unicode `White_Space`) and control characters. Table, column, filter-key and
+`SetVariable` names are validated the same way.
 
 ```go
 id, _ := mygram.QualifyTableIdentity("articles", "app_db") // "app_db.articles"

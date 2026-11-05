@@ -565,7 +565,8 @@ _ = client.CacheEnable()
 `DumpVerifyTimeoutMs`、`OptimizeTimeoutMs`。いずれも既定 300 秒）を使います。
 `TimeoutMs` のままでは、サーバーがまだ実行中のコマンドを打ち切ってしまうから
 です。`TimeoutMs` と同じ値を設定すれば無効化できます。より短いコンテキストの
-期限は引き続き優先されます。
+期限は引き続き優先されます。上限はコマンド文字列で決まるため、
+`SendCommand("optimize")` や `SendCommand("dump   load")` にも同じ値が適用されます。
 
 非同期実行されるほど大きいダンプは `OK DUMP_STARTED <path>` で受理され、
 書き出しはバックグラウンドで続きます。`DumpSave` はこの応答をそのまま返すため、

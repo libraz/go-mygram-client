@@ -17,6 +17,11 @@ term やクエリ文字列に変換するパーサーが同梱されています
 | `(expr)` | グループ化 | `(python OR ruby)` |
 | `term1 OR term2` | 論理 OR | `golang OR rust` |
 
+暗黙の AND は `OR` より強く結合します。括弧の外に `OR` がある式は 1 つの
+グループとして扱われ、`a OR b c` は `a OR (b c)` を意味し、括弧付きの形と同じ
+`(a OR b c)` に変換されます。グループの前の `-` はグループ全体を除外します。
+`foo -(a b)` は `foo AND NOT (a b)` に変換されます。
+
 これらは組み合わせられます。例えば次のように書けます。
 
 ```
@@ -88,6 +93,8 @@ func ConvertSearchExpression(expression string) (string, error)
 mygram.ConvertSearchExpression("+golang +tutorial") // "golang AND tutorial"
 mygram.ConvertSearchExpression("+golang -old")      // "golang AND NOT old"
 mygram.ConvertSearchExpression("python OR ruby")    // "(python OR ruby)"
+mygram.ConvertSearchExpression("a OR b c")          // "(a OR b c)"
+mygram.ConvertSearchExpression("foo -(a b)")        // "foo AND NOT (a b)"
 mygram.ConvertSearchExpression("golang not")        // `golang AND "not"` — 単独の "not" は NOT キーワードと衝突する
 ```
 
@@ -110,12 +117,17 @@ func ParseSearchExpression(expression string) (*SearchExpression, error)
 
 ```go
 type SearchExpression struct {
-    RequiredTerms []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
-    ExcludedTerms []string // terms marked with -
-    OptionalTerms []string // unused; kept for source compatibility
-    RawExpression string   // reconstructed boolean-syntax text for a bare OR chain or group, already wire-quoted
+    RequiredTerms   []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
+    ExcludedTerms   []string // terms marked with -
+    RawExpression   string   // reconstructed boolean-syntax text for an expression with a top-level OR or a bare group, already wire-quoted
+    RequiredIsGroup []bool   // parallel to RequiredTerms: the entry is a formatted (...) group
+    ExcludedIsGroup []bool   // parallel to ExcludedTerms: the entry is a formatted (...) group
 }
 ```
+
+`...IsGroup` フラグは、整形済みの `+(...)` / `-(...)` グループと通常の term
+テキストを区別するためのものです。`"(a OR b)"` のようにグループに見えるだけの
+引用符付きフレーズはフレーズのままで、ワイヤ上では引用符付けされます。
 
 ### HasComplexExpression
 
@@ -124,7 +136,8 @@ func HasComplexExpression(expr *SearchExpression) bool
 ```
 
 解析済みの式が `OR` またはグループ化を含むか（すなわち、単純な AND/NOT の
-term に簡約できないか）を報告します。
+term に簡約できないか）を報告します。グループに見えるだけの引用符付き
+フレーズは数えません。
 
 ### ToQueryString
 
@@ -226,15 +239,21 @@ resp, _ := client.Search("articles", "hello world", mygram.SearchOptions{
   （外側の引用符は取り除かれます）。フレーズを開始できるのは `"` だけで、
   アポストロフィ（`don't`）は term 内のリテラル文字として扱われ、引用符の
   開始とはみなされません。`OR` は大文字小文字を区別せず単語単位で認識され
-  ます（`or`、`Or`、`OR`）。
+  ます（`or`、`Or`、`OR`）。`OR-tools` や `OR回路` のように `OR` で始まるだけ
+  の語は通常の term です。演算子の前後は、空白（ASCII または U+3000）、括弧、
+  二重引用符のいずれかで区切られている必要があります。
 - term は、空である、句のキーワード（`AND`、`OR`、`NOT`、`FILTER`、`SORT`、
   `LIMIT`、`OFFSET`、`HIGHLIGHT`、`FUZZY`、`FACET`、`ORDER` のいずれかと
-  大文字小文字を区別せず一致する）、あるいは ASCII/Unicode の空白、`"`、
-  `'`、`\`、`(`、`)` のいずれかを含む場合にワイヤ上で引用符付けされます。
+  ASCII の大文字小文字を区別せず一致する）、あるいは ASCII の空白、Unicode
+  の `White_Space` コードポイント（U+0085、U+00A0、U+1680、U+2000〜U+200A、
+  U+2028、U+2029、U+202F、U+205F、U+3000）、制御文字、`"`、`'`、`\`、`(`、
+  `)` のいずれかを含む場合にワイヤ上で引用符付けされます。U+200B（ゼロ幅
+  スペース）は空白ではなく、そのまま送られます。
   呼び出し側は常に生の未引用テキストを渡せばよく、引用符付けは自動的かつ
   可逆的に行われます。
 - 括弧付きグループ内の `-` はリテラルな単語 `NOT` としてレンダリングされます。
   サーバーのブールパーサーには単独の `-` に対応する演算子の意味がないためです。
+  直後の term または入れ子のグループだけを否定します。
 - パーサーは、対応の取れない括弧や閉じられていない引用符をエラーとして拒否
   します。信頼できない入力の解析はそれに応じてラップしてください。
 - クライアント経由で送られる入力は、サーバーに届く前に制御文字と長さが検証

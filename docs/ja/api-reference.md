@@ -179,7 +179,10 @@ func (c *Client) DisableDebug() error
 ```
 
 デバッグモードを有効にすると、検索とカウントの応答に、クエリごとの所要時間と
-候補数を格納した `Debug *DebugInfo` フィールドが付与されます。
+候補数を格納した `Debug *DebugInfo` フィールドが付与されます。クライアントは
+サーバーの `OK DEBUG_ON` / `OK DEBUG_OFF` 応答に追従するため、`SendCommand`
+経由で送った `DEBUG ON` も同様に追跡され、接続が置き換わるとフラグは解除され
+ます。
 
 ### ランタイム変数
 
@@ -243,7 +246,9 @@ func (c *Client) SendCommand(command string) (string, error)
 ```
 
 任意のプロトコルコマンドを送り、生のサーバー応答を返します。型付き API が
-カバーしないコマンド向けの避難口です。
+カバーしないコマンド向けの避難口です。`OPTIMIZE`、`DUMP LOAD`、`DUMP VERIFY` は
+大文字小文字や空白の入れ方にかかわらず、ここでも長時間操作用のタイムアウトが
+適用されます。
 
 ## Pool
 
@@ -629,7 +634,9 @@ func ParseTableIdentity(identity string) (database, table string, err error)
 
 `QualifyTableIdentity` は `database.table` の識別子を組み立てます（`database` が
 空のときは素のテーブル名を返します）。`ParseTableIdentity` はそれを各部分に
-分割し直します。どちらも識別子を検証し、空白と制御文字を拒否します。
+分割し直します。どちらも識別子を検証し、空白（ASCII と Unicode の `White_Space`）
+と制御文字を拒否します。テーブル名・カラム名・フィルターキー・`SetVariable` の
+名前も同じ規則で検証されます。
 
 ```go
 id, _ := mygram.QualifyTableIdentity("articles", "app_db") // "app_db.articles"

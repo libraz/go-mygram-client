@@ -567,7 +567,8 @@ and routinely outlast an ordinary request. They use their own budgets —
 `DumpLoadTimeoutMs`, `DumpVerifyTimeoutMs` and `OptimizeTimeoutMs`, each 300 s
 by default — instead of the 5 s `TimeoutMs`, which would abandon a command the
 server is still executing. Set one equal to `TimeoutMs` to opt out; a shorter
-context deadline still wins.
+context deadline still wins. The budget follows the command text, so the same
+values apply to `SendCommand("optimize")` and `SendCommand("dump   load")`.
 
 A dump big enough to run asynchronously is acknowledged with
 `OK DUMP_STARTED <path>` while the write continues in the background.

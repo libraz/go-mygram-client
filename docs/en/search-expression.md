@@ -16,6 +16,11 @@ can parse untrusted user input before deciding how to query.
 | `(expr)` | Grouping | `(python OR ruby)` |
 | `term1 OR term2` | Logical OR | `golang OR rust` |
 
+Implicit AND binds tighter than `OR`, so an expression with an `OR` outside any
+parentheses is one group: `a OR b c` means `a OR (b c)` and converts to
+`(a OR b c)`, exactly like its parenthesized form. A `-` before a group excludes
+the whole group: `foo -(a b)` converts to `foo AND NOT (a b)`.
+
 Expressions may combine these, for example:
 
 ```
@@ -87,6 +92,8 @@ parentheses, so the server's boolean parser can interpret it.
 mygram.ConvertSearchExpression("+golang +tutorial") // "golang AND tutorial"
 mygram.ConvertSearchExpression("+golang -old")      // "golang AND NOT old"
 mygram.ConvertSearchExpression("python OR ruby")    // "(python OR ruby)"
+mygram.ConvertSearchExpression("a OR b c")          // "(a OR b c)"
+mygram.ConvertSearchExpression("foo -(a b)")        // "foo AND NOT (a b)"
 mygram.ConvertSearchExpression("golang not")        // `golang AND "not"` — "not" alone collides with the NOT keyword
 ```
 
@@ -109,12 +116,17 @@ classified terms directly.
 
 ```go
 type SearchExpression struct {
-    RequiredTerms []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
-    ExcludedTerms []string // terms marked with -
-    OptionalTerms []string // unused; kept for source compatibility
-    RawExpression string   // reconstructed boolean-syntax text for a bare OR chain or group, already wire-quoted
+    RequiredTerms   []string // every term that must match: '+'-prefixed and unprefixed (implicit AND), in original order
+    ExcludedTerms   []string // terms marked with -
+    RawExpression   string   // reconstructed boolean-syntax text for an expression with a top-level OR or a bare group, already wire-quoted
+    RequiredIsGroup []bool   // parallel to RequiredTerms: the entry is a formatted (...) group
+    ExcludedIsGroup []bool   // parallel to ExcludedTerms: the entry is a formatted (...) group
 }
 ```
+
+The `...IsGroup` flags are how a formatted `+(...)` or `-(...)` group is told
+apart from plain term text: a quoted phrase that merely looks like a group, such
+as `"(a OR b)"`, stays a phrase and is quoted on the wire.
 
 ### HasComplexExpression
 
@@ -123,7 +135,8 @@ func HasComplexExpression(expr *SearchExpression) bool
 ```
 
 Reports whether a parsed expression contains `OR` or grouping (i.e. cannot be
-simplified into plain AND/NOT terms).
+simplified into plain AND/NOT terms). A quoted phrase shaped like a group does
+not count.
 
 ### ToQueryString
 
@@ -225,15 +238,22 @@ resp, _ := client.Search("articles", "hello world", mygram.SearchOptions{
 - A quoted phrase such as `"hello world"` is parsed into a single term (the
   surrounding quotes are stripped). Only `"` opens a phrase — an apostrophe
   (`don't`) stays literal text within a term rather than starting a quote.
-  `OR` is recognized as a whole word case-insensitively (`or`, `Or`, `OR`).
+  `OR` is recognized as a whole word case-insensitively (`or`, `Or`, `OR`); a
+  word that only begins with it (`OR-tools`, `OR回路`) is an ordinary term.
+  The operator must be delimited by whitespace (ASCII or U+3000), a
+  parenthesis or a double quote.
 - A term is quoted on the wire when it is empty, equal to a clause keyword
   (`AND`, `OR`, `NOT`, `FILTER`, `SORT`, `LIMIT`, `OFFSET`, `HIGHLIGHT`,
-  `FUZZY`, `FACET`, `ORDER`, matched case-insensitively), or contains ASCII or
-  Unicode whitespace, `"`, `'`, `\`, `(` or `)`. Callers always pass raw,
+  `FUZZY`, `FACET`, `ORDER`, matched case-insensitively by ASCII letters
+  only), or contains ASCII whitespace, a Unicode `White_Space` code point
+  (U+0085, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F,
+  U+3000), a control character, `"`, `'`, `\`, `(` or `)`. U+200B (zero width
+  space) is not whitespace and is sent bare. Callers always pass raw,
   unquoted text — quoting is automatic and reversible on the way back out of
   a response.
 - A `-` inside a parenthesized group renders as the literal word `NOT`,
   since the server's boolean parser has no operator meaning for a bare `-`.
+  It negates only the term or nested group that follows it.
 - The parser rejects unbalanced parentheses and unclosed quotes with an error;
   wrap parsing of untrusted input accordingly.
 - Input sent through the client is validated for control characters and length
